@@ -1,0 +1,55 @@
+"""Entry point: `python -m swipread_reco api`.
+
+Reads RECO_DATABASE_URL, RECO_REDIS_URL, RECO_PORT (default 8000), RECO_DB_TIMEOUT_S
+(default 2) and the RECO_* overrides of Params.
+"""
+
+import argparse
+import logging
+import os
+
+import uvicorn
+
+from swipread_reco.api import RedisSeen, create_app, utcnow
+from swipread_reco.catalog_cache import CatalogCache
+from swipread_reco.params import Params
+from swipread_reco.store import DEFAULT_POOL_TIMEOUT_S, PgStore
+
+DEFAULT_PORT = 8000
+HOST = "0.0.0.0"  # reachable from outside the container
+
+log = logging.getLogger("swipread_reco")
+
+
+def run_api() -> None:
+    params = Params.from_env()
+    store = PgStore(
+        os.environ["RECO_DATABASE_URL"],
+        timeout_s=float(os.environ.get("RECO_DB_TIMEOUT_S", DEFAULT_POOL_TIMEOUT_S)),
+    )
+    seen = RedisSeen.from_url(os.environ["RECO_REDIS_URL"])
+    cache = CatalogCache(store, params, utcnow)
+    try:
+        store.ensure_schema()
+        cache.refresh()
+        catalog = cache.get()
+        log.info("catalog loaded: %d articles", len(catalog.ids) if catalog else 0)
+        cache.start()
+        app = create_app(store, seen, cache, params)
+        uvicorn.run(app, host=HOST, port=int(os.environ.get("RECO_PORT", DEFAULT_PORT)))
+    finally:
+        cache.stop()
+        store.close()
+
+
+def main() -> None:
+    parser = argparse.ArgumentParser(prog="python -m swipread_reco")
+    parser.add_argument("command", choices=["api"])
+    args = parser.parse_args()
+    logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s %(message)s")
+    if args.command == "api":
+        run_api()
+
+
+if __name__ == "__main__":
+    main()

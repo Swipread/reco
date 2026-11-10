@@ -86,9 +86,14 @@ class CatalogRow:
 
 
 def make_catalog(rows: Sequence[CatalogRow], now: datetime) -> Catalog:
-    """Catalog sorted by article id, with mu computed on its embeddings (spec 5.1)."""
+    """Catalog sorted by article id, with mu computed on its embeddings (spec 5.1).
+
+    No rows gives an empty catalog with (0, 0) embeddings.
+    """
     ordered = sorted(rows, key=lambda r: r.id)
     embeddings = np.array([r.embedding for r in ordered], dtype=np.float32)
+    if not ordered:
+        embeddings = embeddings.reshape(0, 0)
     return Catalog(
         ids=[r.id for r in ordered],
         index={r.id: k for k, r in enumerate(ordered)},

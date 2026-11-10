@@ -15,6 +15,9 @@ from psycopg_pool import ConnectionPool
 from swipread_reco.models import CatalogRow, Event, Lot, Topic
 from swipread_reco.params import MODEL_VERSION, Params
 
+# Longest wait for a pooled connection (infrastructure setting, not a spec 10 parameter).
+DEFAULT_POOL_TIMEOUT_S = 2.0
+
 # Every event type the profile reads; `impression` is left out (spec 4.1).
 PROFILE_EVENT_TYPES = ["view", "open", "read", "like", "unlike", "save", "share", "hide"]
 
@@ -104,11 +107,14 @@ class PgStore:
     """Store backed by a psycopg connection pool, sessions in UTC, pgvector registered.
 
     The `vector` extension must exist before the pool connects (sql/app_schema.sql).
+    A method that gets no connection within `timeout_s` raises psycopg_pool.PoolTimeout,
+    so an unreachable database fails a request quickly (the backend gives up at 300 ms).
     """
 
-    def __init__(self, dsn: str) -> None:
+    def __init__(self, dsn: str, timeout_s: float = DEFAULT_POOL_TIMEOUT_S) -> None:
         self._pool = ConnectionPool(
-            dsn, kwargs={"options": "-c timezone=UTC"}, configure=_configure, open=True
+            dsn, kwargs={"options": "-c timezone=UTC"}, configure=_configure,
+            timeout=timeout_s, open=True,
         )
 
     def close(self) -> None:
