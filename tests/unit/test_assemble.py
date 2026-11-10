@@ -9,7 +9,7 @@ from swipread_reco.params import Params
 from swipread_reco.scoring import Scores
 from swipread_reco.sim.catalog import SimCatalog, make_sim_catalog
 
-from .helpers import NOW, rows_of, scores_with, sim_from
+from .helpers import NOW, near_duplicate, rows_of, scores_with, sim_from
 
 
 def lot(
@@ -100,3 +100,15 @@ def test_newest_first_without_likes():                           # A12
         dates = [s.catalog.published_at[s.catalog.index[i.article_id]]
                  for i in lot(s, EVEN) if i.topic_id == t]
         assert dates == sorted(dates, reverse=True)
+
+
+def test_same_story_as_a_liked_or_rejected_article_is_never_placed():
+    rows = rows_of(S, S.ids(1)[:6])
+    liked, rejected = rows[0], rows[1]
+    s = sim_from(rows + [near_duplicate(liked, "twin_liked"),
+                         near_duplicate(rejected, "twin_rejected", seed=1)])
+    scores = scores_with(s, liked=[liked.id], rejected=[rejected.id])
+    assert scores.liked_sim[s.catalog.index["twin_liked"], 0] >= Params().dup_sim
+    items = lot(s, {1: 1.0}, count=10, scores=scores, liked_ids=[liked.id],
+                rejected_ids=[rejected.id], excluded=frozenset({liked.id, rejected.id}))
+    assert sorted(i.article_id for i in items) == sorted(r.id for r in rows[2:])

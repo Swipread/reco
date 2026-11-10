@@ -1,5 +1,6 @@
 """Shared helpers for unit tests built on the synthetic catalog (imported explicitly)."""
 
+import dataclasses
 from collections.abc import Sequence
 from datetime import UTC, datetime
 
@@ -29,6 +30,22 @@ def rows_of(sim_catalog: SimCatalog, ids: Sequence[str]) -> list[CatalogRow]:
             embedding=c.embeddings[k],
         ))
     return rows
+
+
+NEAR_DUPLICATE_NOISE = 0.1   # cosine ≈ 0.995 with the original: same story (≥ DUP_SIM)
+
+
+def near_duplicate(row: CatalogRow, article_id: str, seed: int = 0) -> CatalogRow:
+    """The same story as `row` from another outlet: slightly moved embedding, next source.
+
+    The synthetic catalog has no such pairs (two articles of a subtopic sit near 0.65).
+    """
+    noise = np.random.default_rng(seed).standard_normal(row.embedding.shape[0])
+    moved = row.embedding + NEAR_DUPLICATE_NOISE * noise / np.linalg.norm(noise)
+    return dataclasses.replace(
+        row, id=article_id, source_id=row.source_id + 1,
+        embedding=(moved / np.linalg.norm(moved)).astype(np.float32),
+    )
 
 
 def _subtopic(row: CatalogRow) -> tuple[int, int]:

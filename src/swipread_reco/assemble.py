@@ -76,6 +76,9 @@ def build_lot(
     story as a placed article (rule 1) and keeps sources varied (rule 2); failing that,
     rule 1 alone (relaxedSource). A topic with no such candidate is exhausted.
     `scores` covers every catalog row; `mask` selects the candidates.
+
+    Articles the reader liked or rejected count as placed for rule 1 (similarity only:
+    `scores.liked_sim` and `scores.rejected_sim`).
     """
     ranked = _ranked_by_topic(catalog, mask, scores)
     candidates = np.flatnonzero(mask)
@@ -84,7 +87,9 @@ def build_lot(
     for r in candidates.tolist():
         if catalog.cluster_ids[r] is not None:
             cluster_rows.setdefault(catalog.cluster_ids[r], []).append(r)
-    same_story = np.zeros(len(catalog.ids), dtype=bool)   # rows excluded by rule 1
+    # rows excluded by rule 1, starting with the stories the reader already reacted to
+    same_story = ((scores.liked_sim >= params.dup_sim).any(axis=1)
+                  | (scores.rejected_sim >= params.dup_sim).any(axis=1))
     recent_sources: deque[int] = deque(maxlen=SOURCE_WINDOW - 1)
     items: list[LotItem] = []
 
