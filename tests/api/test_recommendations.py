@@ -113,6 +113,14 @@ def test_echo_uses_previous_request_time(client, store):
     assert store.sim.subtopic[first][0] == 4
 
 
+def test_no_echo_when_exclude_holds_the_liked_topic(client, store):    # spec 4.4, last rule
+    post(client)                                                  # fixe last_request_at
+    store.add_event("u_1", "like", store.sim.ids(4)[0], received_at=NOW + timedelta(seconds=5))
+    rid = post(client, exclude=[store.sim.ids(4)[10]]).json()["requestId"]
+    assert store.lots[rid]["lot"].profile.echo_topic is None
+    assert store.request(rid)["profile"]["echoTopic"] is None
+
+
 def test_empty_catalog_returns_empty_items_and_saves_nothing(empty_client, store):
     assert post(empty_client).json()["items"] == [] and store.lots == {}
 

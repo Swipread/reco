@@ -28,6 +28,7 @@ class RecoInput:
     chosen: frozenset[int]
     last_request_at: datetime | None
     now: datetime
+    stock: frozenset[str] = frozenset()  # the request's `exclude` only: the stock the backend kept
 
 
 def _with_embeddings(
@@ -39,6 +40,22 @@ def _with_embeddings(
         return [], np.zeros((0, dim), dtype=np.float32), np.zeros(0)
     emb = np.stack([found[item.article_id] for item in kept]).astype(np.float32)
     return kept, emb, np.array([item.strength for item in kept], dtype=np.float64)
+
+
+def _echo_after_stock(
+    echo_topic: int | None, stock: frozenset[str], catalog: Catalog
+) -> int | None:
+    """No echo when the kept stock already holds an article of the echo topic (spec 4.4).
+
+    Stock ids absent from the catalog are ignored.
+    """
+    if echo_topic is None:
+        return None
+    for article_id in stock:
+        k = catalog.index.get(article_id)
+        if k is not None and int(catalog.topic_ids[k]) == echo_topic:
+            return None
+    return echo_topic
 
 
 def recommend(
@@ -65,7 +82,10 @@ def recommend(
     dim = catalog.embeddings.shape[1]
     liked, liked_emb, liked_strength = _with_embeddings(profile.liked, found, dim)
     rejected, rejected_emb, rejected_strength = _with_embeddings(profile.rejected, found, dim)
-    profile = dataclasses.replace(profile, liked=liked, rejected=rejected)
+    profile = dataclasses.replace(
+        profile, liked=liked, rejected=rejected,
+        echo_topic=_echo_after_stock(profile.echo_topic, inp.stock, catalog),
+    )
 
     scores = score_candidates(
         catalog.embeddings, catalog.published_at,

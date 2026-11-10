@@ -67,16 +67,18 @@ def simulate(
     def refill(at: datetime) -> None:
         nonlocal lot_index, last_request_at
         request_id = f"r_{reader.name}_{lot_index}"
+        kept = frozenset(s.item.article_id for s in stock)
         inp = RecoInput(
             request_id=request_id,
             language=LANGUAGE,
             count=REFILL_COUNT,
-            excluded=frozenset(s.item.article_id for s in stock) | frozenset(seen),
+            excluded=kept | frozenset(seen),
             events=list(events),
             all_topics=all_topics,
             chosen=reader.chosen,
             last_request_at=last_request_at,
             now=at,
+            stock=kept,
         )
         lot_seed = (seed_from_request_id(request_id) + seed) % SEED_MODULUS
         lot = recommend(inp, sim.catalog, sim.embeddings, params, seed=lot_seed)

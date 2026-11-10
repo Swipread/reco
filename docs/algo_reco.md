@@ -166,6 +166,8 @@ Chaque force est multipliée par un facteur d'ancienneté `0,5 ^ (âge_jours / H
 
 Le **thème en écho** est le thème principal de l'article du plus récent événement `like`, `save`, `share` ou `read` avec `scrollDepth > 0,8`, parmi les événements dont `received_at` est postérieur à la précédente requête de reco du même lecteur (`max(generated_at)` dans `reco.feed_requests`). S'il n'y a pas de tel événement, ou si son thème a un poids nul, il n'y a pas d'écho. Il sert en section 6 à placer ce thème en tête du lot. La liste reprend exactement les événements forts positifs du contrat, ceux qui déclenchent le recalcul du stock : chaque recalcul provoqué par un signal positif a donc son écho. C'est le seul usage de `scrollDepth` ; la valeur d'une lecture reste mesurée par le temps (4.1).
 
+Exception : il n'y a pas d'écho si le stock gardé par le backend (la liste `exclude` de la requête, règle 3 du contrat) contient déjà un article de ce thème. Après plusieurs signaux forts d'affilée, chaque carte servie est la première d'un nouveau lot ; sans cette exception, le fil se réduirait au thème en écho.
+
 ## 5. Score d'un article
 
 ### 5.1 Ressemblance entre deux articles

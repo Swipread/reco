@@ -30,6 +30,15 @@ def test_a02_two_likes_then_hide():
     assert t[0] == X and Y not in t and sum(x in CHOSEN for x in t[:10]) >= 6
 
 
+def test_echo_suppressed_when_kept_stock_holds_its_topic():     # spec 4.4, last rule
+    e = [ev("like", S.ids(X)[0], S, 30), ev("like", S.ids(X)[1], S, 20),
+         ev("hide", S.ids(Y)[0], S, 10)]
+    lot = run(S, e)
+    assert topics(lot)[0] == X and lot.profile.echo_topic == X
+    assert run(S, e, stock=frozenset({S.ids(X)[5]})).profile.echo_topic is None
+    assert run(S, e, stock=frozenset({"a_unknown", S.ids(2)[0]})).profile.echo_topic == X
+
+
 def test_a03_five_likes():
     e = [ev("like", S.ids(X)[i], S, 50 - i) for i in range(5)]
     assert run(S, e).profile.weights[X] >= 0.30

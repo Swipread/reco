@@ -35,6 +35,11 @@ def test_faithful_reader_gets_more_of_loved_subtopic():
     assert loved(s[50:]) > loved(s[:10])
 
 
+def test_faithful_reader_feed_stays_diverse():
+    s = run("fidele")
+    assert all(len({c.topic_id for c in s[i:i + 10]}) >= 2 for i in range(0, 100, 10))
+
+
 def test_skipper_always_gets_cards_and_keeps_floors():
     assert len(run("zappeur", 200)) == 200
 
