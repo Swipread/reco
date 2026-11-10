@@ -14,7 +14,7 @@ D'où le parti pris : un modèle entièrement explicite (des poids par thème et
 ### Objectifs
 
 - Les thèmes choisis à l'inscription forment la base du fil ; les interactions la font évoluer.
-- Une interaction forte sur la carte n change le fil à partir de la carte n+10 (section 13, règle du stock), et le changement est net : la première carte recalculée appartient au thème qui vient d'être aimé.
+- Une interaction forte sur la carte n change le fil à partir de la carte n+10 (section 13, règle du stock), et le changement est net : la première carte recalculée appartient au thème qui vient d'être aimé, sauf si une carte de ce thème attend déjà dans le stock gardé par le backend (4.4).
 - Un thème non choisi que le lecteur masque sans l'avoir jamais aimé disparaît du fil.
 - Chaque carte servie est enregistrée avec le détail de son score.
 - La qualité se mesure hors ligne avec des lecteurs simulés (section 11), qui servent aussi de tests d'acceptation.
@@ -168,6 +168,8 @@ Le **thème en écho** est le thème principal de l'article du plus récent év�
 
 Exception : il n'y a pas d'écho si le stock gardé par le backend (la liste `exclude` de la requête, règle 3 du contrat) contient déjà un article de ce thème. Après plusieurs signaux forts d'affilée, chaque carte servie est la première d'un nouveau lot ; sans cette exception, le fil se réduirait au thème en écho.
 
+L'éligibilité d'un événement compare son `received_at`, posé par le backend, au `generated_at` de la requête précédente, posé par la reco : un décalage d'horloge entre les deux peut faire perdre un écho.
+
 ## 5. Score d'un article
 
 ### 5.1 Ressemblance entre deux articles
@@ -215,6 +217,8 @@ Les proportions doivent tenir sur chaque page de 10 cartes, pas seulement sur le
 - la k-ième carte du thème `t` (k = 0, 1, 2…) a pour rang virtuel `τ(t, k) = (k + u[t]) / p[t]` ;
 - les places sont attribuées dans l'ordre croissant de `τ` ; à égalité, plus petit `topic_id` d'abord.
 
+Le stock gardé par le backend (`exclude`, 4.4) sera servi juste avant le lot : ses cartes comptent comme déjà placées. Chaque thème commence donc à `k = nombre de cartes de ce thème dans le stock` au lieu de 0, et l'entrelacement se poursuit au lieu de repartir de zéro. Sans cette règle, après plusieurs signaux forts d'affilée, le lecteur ne verrait que des débuts de lots et une page pourrait compter 7 à 9 cartes d'un même thème. Seul l'ordre relatif des `τ` compte : rien d'autre ne change.
+
 Un thème à 30 % revient ainsi toutes les 3 ou 4 cartes. Un thème à 1,4 % a 14 % de chances d'apparaître dans une page donnée. Le décalage aléatoire évite que les petits thèmes soient toujours relégués en fin de lot, là où le lot est le plus souvent jeté avant d'être servi.
 
 Les tirages se font avec `numpy.random.default_rng(graine)`, dans l'ordre croissant des `topic_id`. La graine est l'entier formé par les 8 premiers octets du SHA-256 du `requestId`, décalé d'un bit vers la droite pour tenir dans un `bigint` ; les tests peuvent l'imposer.
@@ -238,6 +242,11 @@ On parcourt les places dans l'ordre de la section 6.2. Pour une place du thème 
 
 1. **pas la même actualité** qu'un article déjà placé dans le lot. Deux articles traitent la même actualité s'ils ont le même `cluster_id` non nul ou si `sim ≥ DUP_SIM` ;
 2. **sources variées** : parmi les 9 articles placés juste avant, au plus `SOURCE_MAX − 1` viennent de la même source (soit au plus `SOURCE_MAX` par fenêtre de 10).
+
+Deux compléments à ces règles :
+
+- **articles aimés ou rejetés** : un candidat qui traite la même actualité qu'un article aimé ou rejeté du profil (4.3) n'est jamais placé. Seul `sim ≥ DUP_SIM` est comparé ici, les `cluster_id` de ces articles n'étant pas chargés. Sans cela, juste après un like, la proximité placerait en tête la même actualité reprise par un autre média ;
+- **stock gardé** : les cartes de `exclude`, dans l'ordre de la requête, comptent comme placées avant la position 0. Elles marquent leurs mêmes actualités avant le remplissage (règle 1), et la fenêtre des 9 articles précédents commence remplie des sources des 9 dernières cartes du stock (règle 2). Le lecteur les voit juste avant le lot : sans cela, les deux règles ne vaudraient qu'à l'intérieur du lot, pas dans le fil réellement servi.
 
 Si aucun candidat de `t` ne respecte les deux règles, on prend le mieux classé qui respecte la règle 1 seule (et on le note `relaxedSource`). S'il n'y en a pas non plus, le thème est épuisé : cette place et les suivantes du thème sont sautées, ce qui redistribue ses places aux autres au prorata.
 
@@ -369,14 +378,14 @@ Pour tester sans modèle ni base : 10 thèmes, 3 sous-thèmes par thème, 8 sour
 
 ### 11.2 Tests d'acceptation
 
-Tous déterministes (graine et horloge imposées). Sauf mention contraire, les articles ont tous le même âge (24 h), et le lecteur a choisi 3 thèmes sur 10.
+Tous déterministes (graine et horloge imposées). Les bornes de A1, A2 et A4 valent pour la graine imposée par les tests : d'une graine à l'autre, les décalages aléatoires de 6.2 font varier le nombre de cartes d'un thème d'environ 2 cartes en plus ou en moins autour de sa part. Sauf mention contraire, les articles ont tous le même âge (24 h), et le lecteur a choisi 3 thèmes sur 10.
 
 | # | Scénario | Attendu |
 | --- | --- | --- |
 | A1 | Nouveau lecteur, lot de 50 | Entre 40 et 48 cartes des thèmes choisis ; chaque thème choisi a entre 13 et 17 cartes |
 | A2 | Deux likes sur deux articles d'un thème non choisi X, puis masquage d'un article d'un thème non choisi Y ; lot de 50 | Poids égaux à ceux de l'exemple 4.2 à 0,001 près ; position 0 du lot dans le thème X ; aucune carte de Y ; au moins 6 des 10 premières dans les thèmes choisis |
 | A3 | Cinq likes sur cinq articles d'un thème non choisi | Poids du thème ≥ 0,30 |
-| A4 | Vingt likes sur un même thème, lot de 50 | Part calculée du thème égale à `P_MAX` ; au plus 31 cartes du thème dans le lot (30 attendues, une de plus possible par l'arrondi de l'entrelacement) ; au moins 3 thèmes présents |
+| A4 | Vingt likes sur un même thème, lot de 50 | Part calculée du thème égale à `P_MAX` ; au plus 31 cartes du thème dans le lot avec la graine imposée (30 attendues) ; au moins 3 thèmes présents |
 | A5 | Trois likes sur le sous-thème S d'un thème choisi T | Parmi les cartes de T du lot suivant, au moins 70 % sont de S |
 | A6 | Masquage d'un article du sous-thème S d'un thème choisi T | Le poids de T baisse et reste ≥ `W_FLOOR` ; parmi les cartes de T du lot suivant, au plus 15 % sont de S |
 | A7 | Vue longue, ouverture, lecture complète puis like sur un même article | Gain total du thème avant renormalisation égal à `V_LIKE`, pas à la somme |
