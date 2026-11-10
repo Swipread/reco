@@ -1,6 +1,6 @@
 """PostgreSQL access: the only module of the service that holds SQL (docs/database.md)."""
 
-from collections.abc import Sequence
+from collections.abc import Mapping, Sequence
 from datetime import datetime
 from typing import Any, Protocol
 
@@ -92,6 +92,19 @@ class Store(Protocol):
         self, topic_id: int, now: datetime, max_age_days: int, limit: int
     ) -> list[str]: ...
     def purge(self, now: datetime, retention_days: int) -> int: ...
+
+
+def lot_profile_json(lot: Lot, slug: Mapping[int, str]) -> dict[str, Any]:
+    """The `profile` column of feed_requests (spec 9.1), topics named by their slug."""
+    profile = lot.profile
+    return {
+        "weights": {slug[t]: w for t, w in profile.weights.items()},
+        "shares": {slug[t]: s for t, s in lot.shares.items()},
+        "likedCount": len(profile.liked),
+        "rejectedCount": len(profile.rejected),
+        "echoTopic": slug[profile.echo_topic] if profile.echo_topic is not None else None,
+        "mu": lot.mu,
+    }
 
 
 def _configure(conn: Connection) -> None:
@@ -232,22 +245,13 @@ class PgStore:
         """Write the lot's feed_requests row and its feed_items in one transaction (spec 9.1)."""
         with self._pool.connection() as conn, conn.transaction():
             slug = dict(conn.execute("SELECT id, slug FROM app.topics").fetchall())
-            profile = lot.profile
-            profile_json = {
-                "weights": {slug[t]: w for t, w in profile.weights.items()},
-                "shares": {slug[t]: s for t, s in lot.shares.items()},
-                "likedCount": len(profile.liked),
-                "rejectedCount": len(profile.rejected),
-                "echoTopic": slug[profile.echo_topic] if profile.echo_topic is not None else None,
-                "mu": lot.mu,
-            }
             conn.execute(
                 "INSERT INTO reco.feed_requests (request_id, user_id, session_id, model_version,"
                 " requested_count, seed, profile, params, generated_at)"
                 " VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s)",
                 (
                     lot.request_id, user_id, session_id, MODEL_VERSION, requested_count,
-                    lot.seed, Jsonb(profile_json), Jsonb(params.as_dict()), generated_at,
+                    lot.seed, Jsonb(lot_profile_json(lot, slug)), Jsonb(params.as_dict()), generated_at,
                 ),
             )
             with conn.cursor() as cur:

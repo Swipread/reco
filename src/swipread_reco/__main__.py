@@ -1,12 +1,13 @@
 """Entry point: `python -m swipread_reco api`.
 
-Reads RECO_DATABASE_URL, RECO_REDIS_URL, RECO_PORT (default 8000), RECO_DB_TIMEOUT_S
-(default 2) and the RECO_* overrides of Params.
+Reads RECO_DATABASE_URL, RECO_REDIS_URL, RECO_HOST (default 127.0.0.1), RECO_PORT
+(default 8000), RECO_DB_TIMEOUT_S (default 2) and the RECO_* overrides of Params.
 """
 
 import argparse
 import logging
 import os
+from collections.abc import Mapping
 
 import uvicorn
 
@@ -15,10 +16,17 @@ from swipread_reco.catalog_cache import CatalogCache
 from swipread_reco.params import Params
 from swipread_reco.store import DEFAULT_POOL_TIMEOUT_S, PgStore
 
+# The routes are unauthenticated and reachable from the internal network only (spec 9.2):
+# listen on loopback unless RECO_HOST says otherwise (e.g. 0.0.0.0 inside a container).
+DEFAULT_HOST = "127.0.0.1"
 DEFAULT_PORT = 8000
-HOST = "0.0.0.0"  # reachable from outside the container
 
 log = logging.getLogger("swipread_reco")
+
+
+def bind_address(env: Mapping[str, str] = os.environ) -> tuple[str, int]:
+    """(host, port) uvicorn listens on, from RECO_HOST and RECO_PORT."""
+    return env.get("RECO_HOST", DEFAULT_HOST), int(env.get("RECO_PORT", DEFAULT_PORT))
 
 
 def run_api() -> None:
@@ -36,7 +44,8 @@ def run_api() -> None:
         log.info("catalog loaded: %d articles", len(catalog.ids) if catalog else 0)
         cache.start()
         app = create_app(store, seen, cache, params)
-        uvicorn.run(app, host=HOST, port=int(os.environ.get("RECO_PORT", DEFAULT_PORT)))
+        host, port = bind_address()
+        uvicorn.run(app, host=host, port=port)
     finally:
         cache.stop()
         store.close()

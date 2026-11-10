@@ -1,4 +1,5 @@
-"""HTTP API of the api process: POST /v1/recommendations and GET /healthz (spec 8.2, 8.3)."""
+"""HTTP API of the api process: POST /v1/recommendations, GET /healthz and the explanation
+routes (spec 8.2, 8.3, 9.2)."""
 
 import logging
 from collections.abc import Callable
@@ -15,6 +16,7 @@ from pydantic import BaseModel, ConfigDict, Field
 from pydantic.alias_generators import to_camel
 
 from swipread_reco.catalog_cache import CatalogCache
+from swipread_reco.explain import explain_router
 from swipread_reco.params import MODEL_VERSION, Params
 from swipread_reco.recommend import RecoInput, recommend
 from swipread_reco.store import Store
@@ -171,6 +173,8 @@ def create_app(
                 for i in lot.items
             ],
         )
+
+    app.include_router(explain_router(db, params, clock))
 
     @app.get("/healthz", response_model=Health)
     def healthz() -> Health:

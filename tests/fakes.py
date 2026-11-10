@@ -7,8 +7,9 @@ from typing import Any
 import numpy as np
 
 from swipread_reco.models import CatalogRow, Event, Lot, Topic
-from swipread_reco.params import Params
+from swipread_reco.params import MODEL_VERSION, Params
 from swipread_reco.sim.catalog import SimCatalog, make_sim_catalog
+from swipread_reco.store import lot_profile_json
 
 from .unit.helpers import rows_of
 
@@ -38,6 +39,7 @@ class FakeStore:
         self.lots: dict[str, dict[str, Any]] = {}     # request_id -> save_lot arguments
         self.events_limit: int | None = None          # `limit` of the last events() call
         self._dropped: set[str] = set()
+        self._deleted: set[str] = set()
 
     def _check(self) -> None:
         if self.fail:
@@ -46,14 +48,16 @@ class FakeStore:
     # setup helpers
 
     def add_event(
-        self, user_id: str, type_: str, article_id: str, *, received_at: datetime,
+        self, user_id: str, type_: str, article_id: str, *, received_at: datetime | None = None,
         occurred_at: datetime | None = None, payload: Mapping[str, Any] | None = None,
     ) -> None:
-        """Event on a catalog article; occurred_at defaults to received_at."""
+        """Event on a catalog article; each of occurred_at and received_at defaults to the other."""
+        if received_at is None and occurred_at is None:
+            raise ValueError("received_at or occurred_at is required")
         n = sum(len(v) for v in self.user_events.values())
         self.user_events.setdefault(user_id, []).append(Event(
             event_id=f"e_{n}", type=type_, article_id=article_id,
-            occurred_at=occurred_at or received_at, received_at=received_at,
+            occurred_at=occurred_at or received_at, received_at=received_at or occurred_at,
             payload=dict(payload or {}), topic_id=self.sim.subtopic[article_id][0],
             word_count=WORD_COUNT,
         ))
@@ -61,6 +65,13 @@ class FakeStore:
     def drop_articles(self, ids: Sequence[str]) -> None:
         """Leave `ids` out of the next catalog_rows()."""
         self._dropped.update(ids)
+
+    def delete_articles(self, ids: Sequence[str]) -> None:
+        """Remove `ids` from app.articles: no title, no embedding any more."""
+        self._deleted.update(ids)
+
+    def _exists(self, article_id: str) -> bool:
+        return article_id in self.sim.catalog.index and article_id not in self._deleted
 
     # Store
 
@@ -91,7 +102,7 @@ class FakeStore:
 
     def embeddings(self, ids: Sequence[str]) -> dict[str, np.ndarray]:
         self._check()
-        return self.sim.embeddings([i for i in ids if i in self.sim.catalog.index])
+        return self.sim.embeddings([i for i in ids if self._exists(i)])
 
     def last_request_at(self, user_id: str) -> datetime | None:
         self._check()
@@ -115,11 +126,33 @@ class FakeStore:
         }
 
     def request(self, request_id: str) -> dict[str, Any] | None:
-        raise NotImplementedError("not needed yet")
+        """Same shape as PgStore.request: snake_case keys, profile/params/explanation as JSON."""
+        self._check()
+        saved = self.lots.get(request_id)
+        if saved is None:
+            return None
+        lot: Lot = saved["lot"]
+        slugs = {t.id: t.slug for t in self.topic_list}
+        titles = self.article_titles([i.article_id for i in lot.items])
+        return {
+            "request_id": lot.request_id, "user_id": saved["user_id"],
+            "session_id": saved["session_id"], "model_version": MODEL_VERSION,
+            "requested_count": saved["requested_count"], "seed": lot.seed,
+            "profile": lot_profile_json(lot, slugs), "params": saved["params"].as_dict(),
+            "generated_at": saved["generated_at"],
+            "items": [
+                {
+                    "position": position, "article_id": item.article_id,
+                    "topic_id": item.topic_id, "reason": item.reason, "score": item.score,
+                    "explanation": item.explanation, "title": titles.get(item.article_id),
+                }
+                for position, item in enumerate(lot.items)
+            ],
+        }
 
     def article_titles(self, ids: Sequence[str]) -> dict[str, str]:
         self._check()
-        return {i: f"Title {i}" for i in ids if i in self.sim.catalog.index}
+        return {i: f"Title {i}" for i in ids if self._exists(i)}
 
     def articles_to_embed(self, model: str, limit: int) -> list[tuple[str, str, str]]:
         raise NotImplementedError("not needed yet")
