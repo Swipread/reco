@@ -59,12 +59,18 @@ class TopicSequence:
 
     `pop` takes the next topic out of the sequence; `advance` puts it back for its next
     card. A topic popped and never advanced is exhausted. Ties go to the smallest topic_id.
+    `start[t]` is the number of cards of `t` already queued before the sequence (the kept
+    stock): topic `t` starts at k = start[t] instead of 0, continuing the interleaving.
     """
 
-    def __init__(self, shares: Mapping[int, float], offsets: Mapping[int, float]) -> None:
+    def __init__(
+        self, shares: Mapping[int, float], offsets: Mapping[int, float],
+        start: Mapping[int, int] | None = None,
+    ) -> None:
+        start = start or {}
         self._shares = {t: p for t, p in shares.items() if p > 0.0 and t in offsets}
         self._offsets = {t: offsets[t] for t in self._shares}
-        self._k = {t: 0 for t in self._shares}
+        self._k = {t: start.get(t, 0) for t in self._shares}
         self._heap: list[tuple[float, int]] = [(self._tau(t), t) for t in self._shares]
         heapq.heapify(self._heap)
         self._popped: set[int] = set()

@@ -158,7 +158,7 @@ def create_app(
             chosen=db.chosen_topics(req.user_id),
             last_request_at=db.last_request_at(req.user_id),
             now=now,
-            stock=frozenset(req.exclude),
+            stock=tuple(req.exclude),
         )
         lot = recommend(inp, catalog, db.embeddings, params)
         db.save_lot(

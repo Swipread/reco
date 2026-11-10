@@ -69,6 +69,7 @@ def build_lot(
     rejected_ids: Sequence[str],
     count: int,
     params: Params,
+    stock_rows: Sequence[int] = (),
 ) -> list[LotItem]:
     """Fill up to `count` slots in the order of `sequence` (spec 7.2).
 
@@ -78,7 +79,8 @@ def build_lot(
     `scores` covers every catalog row; `mask` selects the candidates.
 
     Articles the reader liked or rejected count as placed for rule 1 (similarity only:
-    `scores.liked_sim` and `scores.rejected_sim`).
+    `scores.liked_sim` and `scores.rejected_sim`). `stock_rows`, the catalog rows of the
+    kept stock in stock order, count as placed before position 0 for rules 1 and 2.
     """
     ranked = _ranked_by_topic(catalog, mask, scores)
     candidates = np.flatnonzero(mask)
@@ -91,6 +93,19 @@ def build_lot(
     same_story = ((scores.liked_sim >= params.dup_sim).any(axis=1)
                   | (scores.rejected_sim >= params.dup_sim).any(axis=1))
     recent_sources: deque[int] = deque(maxlen=SOURCE_WINDOW - 1)
+
+    def place(rows: Sequence[int]) -> None:
+        """Mark the same stories as `rows` (rule 1) and push their sources (rule 2)."""
+        rows = list(rows)
+        dup = sim(catalog.embeddings[rows], candidate_emb, catalog.mu) >= params.dup_sim
+        same_story[candidates[dup.any(axis=0)]] = True
+        same_story[rows] = True
+        for r in rows:
+            same_story[cluster_rows.get(catalog.cluster_ids[r], [])] = True
+            recent_sources.append(int(catalog.source_ids[r]))
+
+    if stock_rows:
+        place(stock_rows)
     items: list[LotItem] = []
 
     while len(items) < count:
@@ -111,11 +126,7 @@ def build_lot(
         if row is None:
             row = remaining[0]
 
-        dup = sim(catalog.embeddings[row][None, :], candidate_emb, catalog.mu)[0] >= params.dup_sim
-        same_story[candidates[dup]] = True
-        same_story[row] = True
-        same_story[cluster_rows.get(catalog.cluster_ids[row], [])] = True
-        recent_sources.append(int(catalog.source_ids[row]))
+        place([row])
 
         affinity = float(scores.affinity[row])
         rejected = _nearest(scores.rejected_sim[row], rejected_ids, 1)

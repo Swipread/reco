@@ -49,26 +49,26 @@ def _fetch(sim: SimCatalog):
 
 def run(
     sim: SimCatalog, events: Sequence[Event] = (), *, count: int = 50, seed: int = 1,
-    excluded: frozenset[str] = frozenset(), stock: frozenset[str] = frozenset(),
+    excluded: frozenset[str] = frozenset(), stock: Sequence[str] = (),
     chosen: frozenset[int] = CHOSEN,
     last_request_at: datetime | None = NOW - timedelta(hours=1), now: datetime = NOW,
     params: Params = DEFAULT_PARAMS,
 ) -> Lot:
     """Call recommend with request_id="r_test", language="fr", all_topics=1..10.
 
-    `stock` is the kept stock sent as `exclude`; like the backend, it is also excluded.
+    `stock` is the kept stock sent as `exclude`, in order; like the backend, it is also excluded.
     """
     inp = RecoInput(
         request_id="r_test",
         language="fr",
         count=count,
-        excluded=excluded | stock,
+        excluded=excluded | frozenset(stock),
         events=events,
         all_topics=ALL_TOPICS,
         chosen=chosen,
         last_request_at=last_request_at,
         now=now,
-        stock=stock,
+        stock=tuple(stock),
     )
     return recommend(inp, sim.catalog, _fetch(sim), params, seed=seed)
 

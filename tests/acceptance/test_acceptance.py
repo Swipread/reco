@@ -35,8 +35,8 @@ def test_echo_suppressed_when_kept_stock_holds_its_topic():     # spec 4.4, last
          ev("hide", S.ids(Y)[0], S, 10)]
     lot = run(S, e)
     assert topics(lot)[0] == X and lot.profile.echo_topic == X
-    assert run(S, e, stock=frozenset({S.ids(X)[5]})).profile.echo_topic is None
-    assert run(S, e, stock=frozenset({"a_unknown", S.ids(2)[0]})).profile.echo_topic == X
+    assert run(S, e, stock=(S.ids(X)[5],)).profile.echo_topic is None
+    assert run(S, e, stock=("a_unknown", S.ids(2)[0])).profile.echo_topic == X
 
 
 def test_a03_five_likes():
@@ -115,3 +115,9 @@ def test_liked_article_without_embedding_is_dropped():           # Review Focus 
     gone = Event("e1", "like", "a_missing", NOW, NOW, {}, 1, 500)
     lot = run(S, [gone, ev("like", S.ids(1, 0)[0], S, 5)])
     assert [i.article_id for i in lot.profile.liked] == [S.ids(1, 0)[0]] and len(lot.items) == 50
+
+
+def test_kept_stock_delays_its_topic():                          # spec 6.2, starting count
+    stock = tuple(S.ids(1)[:5])
+    first_ten = lambda lot: sum(t == 1 for t in topics(lot)[:10])
+    assert first_ten(run(S, stock=stock)) < first_ten(run(S))

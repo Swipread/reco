@@ -69,3 +69,12 @@ def test_exhausted_topic_gives_its_slots_to_others():
     seq2 = TopicSequence({1: 1.0}, {1: 0.0})
     seq2.pop()
     assert seq2.pop() is None
+
+
+def test_sequence_start_counts_cards_already_queued():
+    shares, offsets = {1: 0.5, 2: 0.5}, {1: 0.0, 2: 0.0}
+    assert drain(TopicSequence(shares, offsets, start={1: 3}), 8) == [2, 2, 2, 1, 2, 1, 2, 1]
+    assert drain(TopicSequence(shares, offsets, start={}), 8) == drain(
+        TopicSequence(shares, offsets), 8)
+    seq = TopicSequence({1: 0.0, 2: 1.0}, {2: 0.3}, start={1: 2})   # zero share stays ignored
+    assert drain(seq, 3) == [2, 2, 2]

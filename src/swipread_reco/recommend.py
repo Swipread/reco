@@ -1,6 +1,7 @@
 """The pure recommendation pipeline: profile, scoring, allocation, assembly (spec 2 and 7.1)."""
 
 import dataclasses
+from collections import Counter
 from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass
 from datetime import datetime
@@ -28,7 +29,7 @@ class RecoInput:
     chosen: frozenset[int]
     last_request_at: datetime | None
     now: datetime
-    stock: frozenset[str] = frozenset()  # the request's `exclude` only: the stock the backend kept
+    stock: tuple[str, ...] = ()      # the request's `exclude` only, in order: the stock the backend kept
 
 
 def _with_embeddings(
@@ -42,19 +43,22 @@ def _with_embeddings(
     return kept, emb, np.array([item.strength for item in kept], dtype=np.float64)
 
 
-def _echo_after_stock(
-    echo_topic: int | None, stock: frozenset[str], catalog: Catalog
-) -> int | None:
-    """No echo when the kept stock already holds an article of the echo topic (spec 4.4).
-
-    Stock ids absent from the catalog are ignored.
-    """
-    if echo_topic is None:
-        return None
+def _stock_rows(stock: Sequence[str], catalog: Catalog) -> list[int]:
+    """Catalog rows of the kept stock, in stock order; unknown and repeated ids are ignored."""
+    rows: dict[int, None] = {}
     for article_id in stock:
         k = catalog.index.get(article_id)
-        if k is not None and int(catalog.topic_ids[k]) == echo_topic:
-            return None
+        if k is not None:
+            rows.setdefault(k, None)
+    return list(rows)
+
+
+def _echo_after_stock(
+    echo_topic: int | None, stock_topics: Counter[int]
+) -> int | None:
+    """No echo when the kept stock already holds an article of the echo topic (spec 4.4)."""
+    if echo_topic is None or stock_topics[echo_topic] > 0:
+        return None
     return echo_topic
 
 
@@ -82,9 +86,11 @@ def recommend(
     dim = catalog.embeddings.shape[1]
     liked, liked_emb, liked_strength = _with_embeddings(profile.liked, found, dim)
     rejected, rejected_emb, rejected_strength = _with_embeddings(profile.rejected, found, dim)
+    stock_rows = _stock_rows(inp.stock, catalog)
+    stock_topics = Counter(int(catalog.topic_ids[r]) for r in stock_rows)
     profile = dataclasses.replace(
         profile, liked=liked, rejected=rejected,
-        echo_topic=_echo_after_stock(profile.echo_topic, inp.stock, catalog),
+        echo_topic=_echo_after_stock(profile.echo_topic, stock_topics),
     )
 
     scores = score_candidates(
@@ -95,10 +101,12 @@ def recommend(
     shares = cap_shares(profile.weights, params.p_max)
     offsets = topic_offsets(shares, profile.echo_topic, seed)
     mask = candidate_mask(catalog, inp.language, inp.excluded | profile.touched_article_ids)
+    # The kept stock is queued before this lot: its cards count as already placed (spec 6.2, 7.2).
     items = build_lot(
-        catalog, mask, scores, TopicSequence(shares, offsets), profile.weights, inp.chosen,
+        catalog, mask, scores, TopicSequence(shares, offsets, start=stock_topics),
+        profile.weights, inp.chosen,
         [item.article_id for item in liked], [item.article_id for item in rejected],
-        inp.count, params,
+        inp.count, params, stock_rows,
     )
     return Lot(
         request_id=inp.request_id,

@@ -2,6 +2,8 @@ import dataclasses
 from collections import Counter
 from collections.abc import Mapping, Sequence
 
+import numpy as np
+
 from swipread_reco.allocation import TopicSequence
 from swipread_reco.assemble import build_lot, candidate_mask
 from swipread_reco.models import LotItem
@@ -18,6 +20,7 @@ def lot(
     chosen: frozenset[int] = frozenset({1, 2, 3}), scores: Scores | None = None,
     offsets: Mapping[int, float] | None = None,
     liked_ids: Sequence[str] = (), rejected_ids: Sequence[str] = (),
+    stock_rows: Sequence[int] = (),
 ) -> list[LotItem]:
     catalog = sim_catalog.catalog
     mask = candidate_mask(catalog, language, excluded)
@@ -28,7 +31,7 @@ def lot(
     sequence = TopicSequence(shares, offsets)
     return build_lot(
         catalog, mask, scores, sequence, shares, chosen,
-        liked_ids, rejected_ids, count, Params(),
+        liked_ids, rejected_ids, count, Params(), stock_rows,
     )
 
 
@@ -112,3 +115,21 @@ def test_same_story_as_a_liked_or_rejected_article_is_never_placed():
     items = lot(s, {1: 1.0}, count=10, scores=scores, liked_ids=[liked.id],
                 rejected_ids=[rejected.id], excluded=frozenset({liked.id, rejected.id}))
     assert sorted(i.article_id for i in items) == sorted(r.id for r in rows[2:])
+
+
+def test_stock_sources_fill_the_source_window():
+    first = lot(S, EVEN, count=1)[0].article_id
+    source = S.catalog.source_ids[S.catalog.index[first]]
+    stock = np.flatnonzero(S.catalog.source_ids == source)[-2:].tolist()   # two cards of `source`
+    stock_ids = frozenset(S.catalog.ids[r] for r in stock)
+    items = lot(S, EVEN, count=1, excluded=stock_ids, stock_rows=stock)
+    assert S.catalog.source_ids[S.catalog.index[items[0].article_id]] != source
+    assert items[0].explanation["relaxedSource"] is False
+
+
+def test_same_story_as_a_stock_card_is_never_placed():
+    rows = rows_of(S, S.ids(1)[:5])
+    s = sim_from(rows + [near_duplicate(rows[0], "twin")])
+    stocked = s.catalog.index[rows[0].id]
+    items = lot(s, {1: 1.0}, count=10, excluded=frozenset({rows[0].id}), stock_rows=[stocked])
+    assert sorted(i.article_id for i in items) == sorted(r.id for r in rows[1:])
