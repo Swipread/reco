@@ -1,4 +1,4 @@
-"""Shared helpers for unit tests built on the synthetic catalog."""
+"""Shared helpers for unit tests built on the synthetic catalog (imported explicitly)."""
 
 from collections.abc import Sequence
 from datetime import UTC, datetime

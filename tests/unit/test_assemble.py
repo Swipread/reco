@@ -2,14 +2,14 @@ import dataclasses
 from collections import Counter
 from collections.abc import Mapping, Sequence
 
-from conftest import NOW, rows_of, scores_with, sim_from
-
 from swipread_reco.allocation import TopicSequence
 from swipread_reco.assemble import build_lot, candidate_mask
 from swipread_reco.models import LotItem
 from swipread_reco.params import Params
 from swipread_reco.scoring import Scores
 from swipread_reco.sim.catalog import SimCatalog, make_sim_catalog
+
+from .helpers import NOW, rows_of, scores_with, sim_from
 
 
 def lot(
