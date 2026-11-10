@@ -4,7 +4,7 @@ from datetime import timedelta
 
 import pytest
 
-from swipread_reco.params import Params
+from swipread_reco.params import SCORE_DECIMALS, Params
 
 from ..fakes import NOW
 from .test_recommendations import post
@@ -102,8 +102,15 @@ def test_request_explanation_is_the_saved_lot(client, store):
     }
     assert [(i["articleId"], i["topicSlug"], i["reason"], i["score"], i["explanation"])
             for i in b["items"]] == [
-        (i.article_id, f"t{i.topic_id}", i.reason, i.score, i.explanation) for i in lot.items
+        (i.article_id, f"t{i.topic_id}", i.reason, round(i.score, SCORE_DECIMALS), i.explanation)
+        for i in lot.items
     ]
+
+
+def test_request_scores_equal_the_recommendations_response_scores(client):
+    response = post(client).json()
+    items = client.get(f"/v1/explain/requests/{response['requestId']}").json()["items"]
+    assert [i["score"] for i in items] == [i["score"] for i in response["items"]]
 
 
 def test_request_item_of_a_deleted_article_has_null_title(client, store):

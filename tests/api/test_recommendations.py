@@ -59,6 +59,13 @@ def test_store_failure_is_503(client, store):
     assert post(client).status_code == 503
 
 
+def test_store_failure_is_logged_with_its_traceback(client, store, caplog):
+    store.fail = True
+    post(client)
+    record = next(r for r in caplog.records if r.getMessage().startswith("store call"))
+    assert record.exc_info is not None and "StoreDown" in caplog.text
+
+
 def test_unreachable_database_is_503_without_waiting(store, seen, cache):
     pg = PgStore("postgresql://postgres@127.0.0.1:1/postgres", timeout_s=0.2)
     try:

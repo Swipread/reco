@@ -16,7 +16,7 @@ from pydantic.alias_generators import to_camel
 
 from swipread_reco.allocation import cap_shares
 from swipread_reco.models import ProfileItem
-from swipread_reco.params import Params
+from swipread_reco.params import SCORE_DECIMALS, Params
 from swipread_reco.profile import build_profile
 from swipread_reco.store import Store
 
@@ -154,7 +154,8 @@ def explain_router(store: Store, params: Params, clock: Callable[[], datetime]) 
             items=[
                 ExplainedItem(
                     position=i["position"], article_id=i["article_id"], title=i["title"],
-                    topic_slug=slug.get(i["topic_id"]), reason=i["reason"], score=i["score"],
+                    topic_slug=slug.get(i["topic_id"]), reason=i["reason"],
+                    score=round(i["score"], SCORE_DECIMALS),
                     explanation=i["explanation"],
                 )
                 for i in row["items"]

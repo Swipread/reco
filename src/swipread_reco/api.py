@@ -17,7 +17,7 @@ from pydantic.alias_generators import to_camel
 
 from swipread_reco.catalog_cache import CatalogCache
 from swipread_reco.explain import explain_router
-from swipread_reco.params import MODEL_VERSION, Params
+from swipread_reco.params import MODEL_VERSION, SCORE_DECIMALS, Params
 from swipread_reco.recommend import RecoInput, recommend
 from swipread_reco.store import Store
 
@@ -25,7 +25,6 @@ log = logging.getLogger(__name__)
 
 # Longest wait on Redis for seen:{userId} (infrastructure setting, not a spec 10 parameter).
 DEFAULT_REDIS_TIMEOUT_S = 0.1
-SCORE_DECIMALS = 4
 MAX_COUNT = 100  # contract: count is 1 to 100
 
 
@@ -125,7 +124,7 @@ def create_app(
 
     @app.exception_handler(StoreUnavailable)
     async def store_unavailable(request: Request, exc: StoreUnavailable) -> JSONResponse:
-        log.error("store call %s failed: %r", exc, exc.__cause__)
+        log.error("store call %s failed", exc, exc_info=exc)
         return JSONResponse(status_code=503, content={"detail": "store unavailable"})
 
     def seen_ids(user_id: str) -> frozenset[str]:

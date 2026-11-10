@@ -5,6 +5,10 @@ reader has seen every card of the previous page; it is refilled with REFILL_COUN
 excluding its current content and every served article, when it falls under REFILL_BELOW;
 a strong event on the card at position p of the page (from 0) keeps the p first articles of
 the stock and refills it, so an event on card n shows from card n + 10 on.
+
+Cold start: when the stock holds less than a page at fetch time (the very first page, or
+after a strong event late in a page), it is refilled before the page is popped. This stands
+in for the real backend, which serves its fallback feed instead of waiting for the reco.
 """
 
 from dataclasses import dataclass

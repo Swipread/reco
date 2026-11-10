@@ -10,7 +10,14 @@ from datetime import UTC, datetime
 from pathlib import Path
 
 from swipread_reco.params import Params
-from swipread_reco.sim.backend import PAGE_SIZE, REFILL_BELOW, REFILL_COUNT, Served, simulate
+from swipread_reco.sim.backend import (
+    CARD_INTERVAL,
+    PAGE_SIZE,
+    REFILL_BELOW,
+    REFILL_COUNT,
+    Served,
+    simulate,
+)
 from swipread_reco.sim.catalog import SimCatalog, make_sim_catalog
 from swipread_reco.sim.readers import LONG_DWELL_MS, READERS, SHORT_DWELL_MS, Reader
 
@@ -76,17 +83,27 @@ def _percent(share: float) -> str:
     return f"{round(share * 100)} %"
 
 
-def _markdown(rows_by_reader: dict[str, list[dict]], n_cards: int, seed: int) -> str:
+def _markdown(
+    rows_by_reader: dict[str, list[dict]], sim: SimCatalog, n_cards: int, seed: int
+) -> str:
+    c = sim.catalog
+    n_topics = len(set(c.topic_ids.tolist()))
+    n_subtopics = len(set(sim.subtopic.values())) // n_topics
+    n_sources = len(set(c.source_ids.tolist()))
+    seconds = round(CARD_INTERVAL.total_seconds())
     lines = [
         "# Lecteurs simulés : adaptation du fil",
         "",
-        (f"Chaque lecteur voit {n_cards} cartes, une toutes les 10 secondes, servies par pages "
-         f"de {PAGE_SIZE} à partir d'un stock qui imite le backend : remplissage de "
+        (f"Chaque lecteur voit {n_cards} cartes, une toutes les {seconds} secondes, servies par "
+         f"pages de {PAGE_SIZE} à partir d'un stock qui imite le backend : remplissage de "
          f"{REFILL_COUNT} articles quand le stock passe sous {REFILL_BELOW}, et après chaque "
          "événement fort (like, masquage) sur la carte de position p de la page, seuls les p "
-         "premiers articles du stock sont gardés avant un nouveau remplissage. Chaque lot vient "
-         "de l'algorithme réel (`recommend`), sur le catalogue synthétique (10 thèmes, "
-         f"3 sous-thèmes, 8 sources), graine {seed}."),
+         "premiers articles du stock sont gardés avant un nouveau remplissage. Quand le stock "
+         "contient moins d'une page au moment de la servir (première page, ou événement fort "
+         "en fin de page), il est rempli avant d'être servi : cela tient lieu du fil de repli "
+         "que sert le vrai backend. Chaque lot vient de l'algorithme réel (`recommend`), sur le "
+         f"catalogue synthétique ({n_topics} thèmes, {n_subtopics} sous-thèmes par thème, "
+         f"{n_sources} sources), graine {seed}."),
         "",
         (f"Colonnes, par page de {PAGE_SIZE} cartes : part de cartes pertinentes (dans les goûts "
          "du lecteur), part du thème préféré, part d'exploration (`reason = explore`), nombre de "
@@ -117,7 +134,7 @@ def write_report(out_dir: Path, n_cards: int = 100, seed: int = 0) -> None:
         writer.writeheader()
         for reader in READERS:
             writer.writerows(rows_by_reader[reader.name])
-    (out_dir / "report.md").write_text(_markdown(rows_by_reader, n_cards, seed))
+    (out_dir / "report.md").write_text(_markdown(rows_by_reader, sim, n_cards, seed))
 
 
 def main(argv: Sequence[str] | None = None) -> None:

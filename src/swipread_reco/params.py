@@ -7,6 +7,7 @@ from dataclasses import dataclass
 
 MODEL_VERSION = "topic-weights-v1"
 EMBEDDING_MODEL = "multilingual-e5-small"
+SCORE_DECIMALS = 4  # contract: scores are sent rounded, by the recommendations and explain routes
 
 ENV_PREFIX = "RECO_"
 
