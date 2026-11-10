@@ -1,25 +1,32 @@
-"""Entry point: `python -m swipread_reco api`.
+"""Entry point: `python -m swipread_reco api` or `python -m swipread_reco worker`.
 
-Reads RECO_DATABASE_URL, RECO_REDIS_URL, RECO_HOST (default 127.0.0.1), RECO_PORT
-(default 8000), RECO_DB_TIMEOUT_S (default 2) and the RECO_* overrides of Params.
+Both read RECO_DATABASE_URL, RECO_REDIS_URL, RECO_DB_TIMEOUT_S (default 2) and the RECO_*
+overrides of Params; the api also reads RECO_HOST (default 127.0.0.1) and RECO_PORT
+(default 8000).
 """
 
 import argparse
 import logging
 import os
+import time
 from collections.abc import Mapping
 
+import redis
 import uvicorn
 
 from swipread_reco.api import RedisSeen, create_app, utcnow
 from swipread_reco.catalog_cache import CatalogCache
 from swipread_reco.params import Params
 from swipread_reco.store import DEFAULT_POOL_TIMEOUT_S, PgStore
+from swipread_reco.worker import run_worker
+from swipread_reco.worker.encode import E5Encoder
 
 # The routes are unauthenticated and reachable from the internal network only (spec 9.2):
 # listen on loopback unless RECO_HOST says otherwise (e.g. 0.0.0.0 inside a container).
 DEFAULT_HOST = "127.0.0.1"
 DEFAULT_PORT = 8000
+# The worker is not on a request path: give Redis longer than the api's 100 ms.
+WORKER_REDIS_TIMEOUT_S = 5.0
 
 log = logging.getLogger("swipread_reco")
 
@@ -29,12 +36,16 @@ def bind_address(env: Mapping[str, str] = os.environ) -> tuple[str, int]:
     return env.get("RECO_HOST", DEFAULT_HOST), int(env.get("RECO_PORT", DEFAULT_PORT))
 
 
-def run_api() -> None:
-    params = Params.from_env()
-    store = PgStore(
+def open_store() -> PgStore:
+    return PgStore(
         os.environ["RECO_DATABASE_URL"],
         timeout_s=float(os.environ.get("RECO_DB_TIMEOUT_S", DEFAULT_POOL_TIMEOUT_S)),
     )
+
+
+def run_api() -> None:
+    params = Params.from_env()
+    store = open_store()
     seen = RedisSeen.from_url(os.environ["RECO_REDIS_URL"])
     cache = CatalogCache(store, params, utcnow)
     try:
@@ -51,13 +62,30 @@ def run_api() -> None:
         store.close()
 
 
+def run_worker_process() -> None:
+    params = Params.from_env()
+    store = open_store()
+    client = redis.Redis.from_url(
+        os.environ["RECO_REDIS_URL"], decode_responses=True,
+        socket_timeout=WORKER_REDIS_TIMEOUT_S, socket_connect_timeout=WORKER_REDIS_TIMEOUT_S,
+    )
+    try:
+        store.ensure_schema()  # purge needs reco.feed_requests even if the api never started
+        run_worker(store, client, E5Encoder(), params, utcnow, time.sleep)
+    finally:
+        client.close()
+        store.close()
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(prog="python -m swipread_reco")
-    parser.add_argument("command", choices=["api"])
+    parser.add_argument("command", choices=["api", "worker"])
     args = parser.parse_args()
     logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s %(message)s")
     if args.command == "api":
         run_api()
+    else:
+        run_worker_process()
 
 
 if __name__ == "__main__":

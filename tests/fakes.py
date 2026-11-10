@@ -25,7 +25,8 @@ class FakeStore:
     """Store over a synthetic catalog (topics 1..10, 1 800 articles in French).
 
     Users u_1 and u_new exist (locale fr-FR, chosen topics 1, 2, 3, no events). Setting
-    `fail` makes every method raise StoreDown.
+    `fail` makes every method raise StoreDown. For the worker, `pending` lists the
+    articles to encode and `fail_purge` makes purge() alone raise StoreDown.
     """
 
     def __init__(self, sim: SimCatalog | None = None) -> None:
@@ -40,6 +41,15 @@ class FakeStore:
         self.events_limit: int | None = None          # `limit` of the last events() call
         self._dropped: set[str] = set()
         self._deleted: set[str] = set()
+        # worker
+        self.pending: list[tuple[str, str, str]] = []   # (id, title, summary) in app.articles
+        self.written: dict[str, np.ndarray] = {}        # id -> embedding written
+        self.written_models: dict[str, str] = {}        # id -> embedding_model written
+        self.written_model: str | None = None           # model of the last write_embeddings()
+        self.written_at: datetime | None = None         # `now` of the last write_embeddings()
+        self.encode_calls = 0                           # articles_to_embed() calls
+        self.fail_purge = False                         # purge() raises StoreDown when set
+        self.purged: list[tuple[datetime, int]] = []    # (now, retention_days) of purge() calls
 
     def _check(self) -> None:
         if self.fail:
@@ -155,20 +165,43 @@ class FakeStore:
         return {i: f"Title {i}" for i in ids if self._exists(i)}
 
     def articles_to_embed(self, model: str, limit: int) -> list[tuple[str, str, str]]:
-        raise NotImplementedError("not needed yet")
+        self._check()
+        self.encode_calls += 1
+        return [p for p in self.pending if self.written_models.get(p[0]) != model][:limit]
 
     def write_embeddings(
         self, rows: Sequence[tuple[str, np.ndarray]], model: str, now: datetime
     ) -> None:
-        raise NotImplementedError("not needed yet")
+        self._check()
+        for article_id, embedding in rows:
+            self.written[article_id] = embedding
+            self.written_models[article_id] = model
+        self.written_model = model
+        self.written_at = now
 
     def fallback_ids(
         self, topic_id: int, now: datetime, max_age_days: int, limit: int
     ) -> list[str]:
-        raise NotImplementedError("not needed yet")
+        """Same order as PgStore: published_at descending, then id."""
+        rows = [r for r in self.catalog_rows(now, max_age_days) if r.topic_id == topic_id]
+        rows.sort(key=lambda r: r.id)
+        rows.sort(key=lambda r: r.published_at, reverse=True)
+        return [r.id for r in rows[:limit]]
 
     def purge(self, now: datetime, retention_days: int) -> int:
-        raise NotImplementedError("not needed yet")
+        """Delete saved lots older than `retention_days` or of users gone from `locales`."""
+        self._check()
+        if self.fail_purge:
+            raise StoreDown("purge failed")
+        self.purged.append((now, retention_days))
+        oldest = now - timedelta(days=retention_days)
+        gone = [
+            request_id for request_id, saved in self.lots.items()
+            if saved["generated_at"] < oldest or saved["user_id"] not in self.locales
+        ]
+        for request_id in gone:
+            del self.lots[request_id]
+        return len(gone)
 
 
 class SeenDown(Exception):
