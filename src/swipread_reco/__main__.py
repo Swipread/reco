@@ -12,6 +12,7 @@ import os
 import signal
 import time
 from collections.abc import Mapping
+from importlib.metadata import PackageNotFoundError, version
 
 import redis
 import uvicorn
@@ -32,6 +33,14 @@ DEFAULT_PORT = 8081  # the backend calls http://localhost:8081 by default (appli
 WORKER_REDIS_TIMEOUT_S = 5.0
 
 log = logging.getLogger("swipread_reco")
+
+
+def package_version() -> str:
+    """Version of the installed package (pyproject.toml, the release tag), or "unknown"."""
+    try:
+        return version("swipread-reco")
+    except PackageNotFoundError:
+        return "unknown"
 
 
 def bind_address(env: Mapping[str, str] = os.environ) -> tuple[str, int]:
@@ -102,6 +111,7 @@ def main() -> None:
     parser.add_argument("command", choices=["api", "worker"])
     args = parser.parse_args()
     logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s %(message)s")
+    log.info("swipread-reco %s, %s", package_version(), args.command)
     if args.command == "api":
         run_api()
     else:
