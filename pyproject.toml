@@ -1,8 +1,12 @@
 [project]
 name = "swipread-reco"
 version = "0.1.0"
-description = "Swipread news-article recommendation service"
+description = "Swipread recommender: topic-weight feed recommendations served to the API"
+readme = "README.md"
+license = { text = "All rights reserved" }
+authors = [{ name = "Swipread" }]
 requires-python = ">=3.12,<3.13"
+classifiers = ["Private :: Do Not Upload"]
 dependencies = [
     "fastapi>=0.115",
     "uvicorn>=0.32",

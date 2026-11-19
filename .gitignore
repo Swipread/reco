@@ -1,7 +1,25 @@
-.superpowers/
+# Python and tools
 .venv/
 __pycache__/
 *.pyc
 .pytest_cache/
 .ruff_cache/
+dist/
+build/
+*.egg-info/
+
+# Output of the jury report (python -m swipread_reco.sim.report)
 report/
+
+# Local environment
+.env
+.env.*
+
+# Editors and OS
+.idea/
+.vscode/
+.DS_Store
+.superpowers/
+
+# Internal team documents (backend contract, implementation plan): shared outside git
+notes/

@@ -2,7 +2,7 @@
 
 Service de recommandation d'articles de Swipread : il compose, pour chaque lecteur, un lot d'articles à partir des thèmes choisis à l'inscription et de ses interactions, avec le détail du score de chaque carte. Un processus `worker` à côté encode les nouveaux articles, tient les listes de repli, lit le flux `events` du backend pour tenir à jour le profil de chaque lecteur (et effacer celui d'un compte supprimé), et purge les vieilles traces.
 
-Spécification : [`docs/algo_reco.md`](docs/algo_reco.md). Contrat avec le backend : [`docs/Contrat backend reco.md`](docs/Contrat%20backend%20reco.md).
+Spécification : [`docs/algo_reco.md`](docs/algo_reco.md). Le contrat avec le backend est un document interne aux équipes, partagé hors de git (`notes/`, ignoré) ; l'API du backend est décrite dans [`docs/api.md` de Swipread/api](https://github.com/Swipread/api/blob/main/docs/api.md).
 
 ## Prérequis
 

@@ -1,6 +1,6 @@
 # Algorithme de recommandation — spécification v1
 
-Document de travail pour l'équipe qui code le service de reco. Il remplace le premier jet (schémas seuls). Il se lit avec [Contrat backend reco.md](Contrat%20backend%20reco.md) et [api.md](api.md), qui font référence pour les échanges ; en cas de désaccord sur un format d'échange, ce sont eux qui ont raison.
+Document de travail pour l'équipe qui code le service de reco. Il remplace le premier jet (schémas seuls). Il se lit avec le contrat backend/reco (document interne aux équipes, partagé hors de git) et [`docs/api.md` de Swipread/api](https://github.com/Swipread/api/blob/main/docs/api.md), qui font référence pour les échanges ; en cas de désaccord sur un format d'échange, ce sont eux qui ont raison.
 
 ## 1. Intention
 
