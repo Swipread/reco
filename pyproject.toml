@@ -35,6 +35,7 @@ addopts = "--strict-markers"
 markers = [
     "integration: needs real PostgreSQL and Redis (skipped unless RECO_TEST_DSN is set)",
     "perf: performance tests",
+    "e2e: end-to-end tests against the real backend (run by scripts/e2e.sh, skipped otherwise)",
 ]
 
 [tool.ruff]
