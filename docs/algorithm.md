@@ -14,14 +14,14 @@ Hence the choice: a fully explicit model (weights per topic and a score formula)
 ### Goals
 
 - The topics chosen at sign-up form the base of the feed; interactions make it evolve.
-- A strong interaction on card n changes the feed from card n+10 on (stock rule decided with the backend; the current backend gives between n+11 and n+20, see [Decisions](decisions.md#gaps-with-the-backend)), and the change is clear: the first recomputed card belongs to the topic just liked, unless a card of that topic already waits in the stock the backend kept (4.4).
+- A strong interaction on card n changes the feed from card n+10 on (stock rule decided with the backend; the current backend gives between n+11 and n+20), and the change is clear: the first recomputed card belongs to the topic just liked, unless a card of that topic already waits in the stock the backend kept (4.4).
 - An unchosen topic that the reader hides without ever having liked it leaves the feed.
 - Every card served is saved with the breakdown of its score.
 - Quality is measured offline with simulated readers (section 11), which are also the acceptance tests.
 
 ### Out of scope
 
-- A learned ranking model (LightGBM or other), popularity statistics, collaborative filtering, A/B tests, a separate session vector. [Decisions](decisions.md#with-real-traffic) says what we would do with them given traffic.
+- A learned ranking model (LightGBM or other), popularity statistics, collaborative filtering, A/B tests, a separate session vector.
 - Consent to personalisation (`app.users.personalization_consent_at`): it does not exist in the API, the service ignores it.
 - The screen that shows the explanations to the jury. The service exposes the data (section 9); how to display it is to be decided.
 
@@ -296,7 +296,7 @@ Every 10 minutes, for each topic, the 50 most recent articles of active sources 
 
 ### 8.6 Stored profiles and the `events` stream
 
-Contract v1.5. The worker reads the `events` stream in the consumer group `reco` and, for each reader with a new event, recomputes the profile from `app.events` (never from the message) and stores the result of the replay (4.2, 4.3) in `reco.user_profiles` with its mark; on `user_deleted` it deletes the reader's profile and batches at once. A request uses the stored profile only if its mark (number of profile events, last `occurred_at` and `event_id`) and its basis (model version, parameters, topics, chosen topics) match the moment; otherwise it replays `app.events` and stores the result. The age factor (4.3) and the echo topic (4.4) are always computed at the request. Details: [Flows](flows.md#a-strong-signal), [Decisions](decisions.md) (ADR-4, ADR-5).
+Contract v1.5. The worker reads the `events` stream in the consumer group `reco` and, for each reader with a new event, recomputes the profile from `app.events` (never from the message) and stores the result of the replay (4.2, 4.3) in `reco.user_profiles` with its mark; on `user_deleted` it deletes the reader's profile and batches at once. A request uses the stored profile only if its mark (number of profile events, last `occurred_at` and `event_id`) and its basis (model version, parameters, topics, chosen topics) match the moment; otherwise it replays `app.events` and stores the result. The age factor (4.3) and the echo topic (4.4) are always computed at the request. Details: [Flows](flows.md#a-strong-signal).
 
 ### 8.7 Purge
 
@@ -384,7 +384,7 @@ All deterministic (seed and clock imposed). The bounds of A1, A2 and A4 hold for
 
 ### 11.3 Report for the jury
 
-A script plays 4 typical readers over 100 cards each, imitating the backend (pages of 10, the n+10 stock rule decided with the backend; the current backend differs, see [Decisions](decisions.md#gaps-with-the-backend)), and produces a table per reader and per page of 10:
+A script plays 4 typical readers over 100 cards each, imitating the backend (pages of 10, the n+10 stock rule decided with the backend; the current backend differs), and produces a table per reader and per page of 10:
 
 - share of relevant cards (within the simulated reader's stated tastes);
 - share of the favourite topic;

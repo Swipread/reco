@@ -143,7 +143,7 @@ The algorithm of the specification is implemented with its acceptance tests and 
 
 | | |
 | --- | --- |
-| **Guides** | [Getting started](docs/getting-started.md) · [Architecture](docs/architecture.md) · [Flows](docs/flows.md) · [Database](docs/database.md) · [Configuration](docs/configuration.md) · [Testing](docs/testing.md) · [Decisions](docs/decisions.md) · [FAQ](docs/faq.md) · [Glossary](docs/glossary.md) |
+| **Guides** | [Getting started](docs/getting-started.md) · [Architecture](docs/architecture.md) · [Flows](docs/flows.md) · [Database](docs/database.md) · [Configuration](docs/configuration.md) · [Testing](docs/testing.md) · [FAQ](docs/faq.md) · [Glossary](docs/glossary.md) |
 | **Reference** | [Algorithm](docs/algorithm.md) |
 
 Start from the [documentation index](docs/README.md).

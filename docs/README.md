@@ -12,7 +12,6 @@ Developer documentation for the recommendation service. New here? Read [Getting 
 | [Database](database.md) | See what the recommender reads in `app`, its own tables in `reco` and its rights |
 | [Configuration](configuration.md) | Environment variables, parameters of the algorithm, production checklist |
 | [Testing](testing.md) | Unit, integration, performance and end-to-end tests, continuous integration, the report |
-| [Decisions](decisions.md) | Architecture decision records, gaps with the backend, what real traffic would change, open questions |
 | [FAQ](faq.md) | Fix common problems and understand a batch |
 | [Glossary](glossary.md) | Look up a term |
 
