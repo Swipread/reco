@@ -33,6 +33,7 @@ MAX_AGE_HOURS = 240          # sample articles published over the last 10 days
 DUP_OF = "a_dev0001"         # article liked in E7
 DUP_ID = "a_e2e_dup"         # its near-duplicate, the freshest article of its topic
 DUP_NOISE = 0.05             # cos(DUP_ID, DUP_OF) ~ 0.999
+SETUP_TIMEOUT_S = 15         # connections of the setup, not on a request path
 
 # (id, topic slug, title, summary), in pairs about the same subject.
 EXTRA_PAIRS = [
@@ -141,10 +142,10 @@ def _insert_article(
 
 def seed(admin_dsn: str, reco_dsn: str, now: datetime) -> None:
     rng = np.random.default_rng(SEED)
-    with psycopg.connect(admin_dsn, autocommit=True) as admin:
+    with psycopg.connect(admin_dsn, autocommit=True, connect_timeout=SETUP_TIMEOUT_S) as admin:
         _create_reco_role(admin, reco_dsn)
         # The reco's tables are created by the reco's role, which therefore owns them.
-        store = PgStore(reco_dsn)
+        store = PgStore(reco_dsn, timeout_s=SETUP_TIMEOUT_S)
         try:
             store.ensure_schema()
         finally:
