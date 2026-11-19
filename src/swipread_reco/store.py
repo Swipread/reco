@@ -285,7 +285,8 @@ class PgStore:
 
     def ensure_schema(self) -> None:
         """Create the reco tables if missing; SchemaError if schema `reco` or type `vector` is,
-        or if reco.user_profiles is still the table of the backend's migration V1 (dropped by V8).
+        if reco.user_profiles is still the table of the backend's migration V1 (dropped by V8),
+        or if a table of `reco` is not readable and writable by this role.
 
         Runs on its own connection: the pooled ones need the `vector` type to start.
         """
@@ -303,15 +304,34 @@ class PgStore:
                     "type vector is missing: the pgvector extension is created by the backend's"
                     " migration V1 (Swipread/api), run the backend migrations first"
                 )
+            # pg_attribute rather than information_schema, which hides the columns of a table
+            # the role has no rights on.
             legacy = conn.execute(
                 "SELECT to_regclass('reco.user_profiles') IS NOT NULL AND NOT EXISTS ("
-                " SELECT 1 FROM information_schema.columns WHERE table_schema = 'reco'"
-                " AND table_name = 'user_profiles' AND column_name = 'state')"
+                " SELECT 1 FROM pg_attribute WHERE attrelid = to_regclass('reco.user_profiles')"
+                " AND attname = 'state' AND NOT attisdropped)"
             ).fetchone()[0]
             if legacy:
                 raise SchemaError(
                     "reco.user_profiles is the backend's old table: its migration V8"
                     " (Swipread/api) drops it, run the backend migrations first"
+                )
+            no_rights = conn.execute(
+                "SELECT string_agg(c.relname, ', ' ORDER BY c.relname) FROM pg_class c"
+                " JOIN pg_namespace n ON n.oid = c.relnamespace"
+                " WHERE n.nspname = 'reco' AND c.relkind IN ('r', 'p') AND NOT ("
+                " has_table_privilege(c.oid, 'SELECT') AND has_table_privilege(c.oid, 'INSERT')"
+                " AND has_table_privilege(c.oid, 'UPDATE')"
+                " AND has_table_privilege(c.oid, 'DELETE'))"
+            ).fetchone()[0]
+            if no_rights:
+                # Typically a dump restored with --no-owner: the tables then belong to the
+                # restoring role, and the default privileges come back after them.
+                raise SchemaError(
+                    f"no read-write rights on reco tables {no_rights}: they belong to another"
+                    " role, give them back with ALTER TABLE … OWNER TO the reco login role, or"
+                    " GRANT SELECT, INSERT, UPDATE, DELETE ON ALL TABLES IN SCHEMA reco TO"
+                    " swipread_reco"
                 )
             conn.execute(RECO_SCHEMA)
 

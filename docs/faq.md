@@ -11,6 +11,9 @@ The database has not received the API's migrations. Start the API once on it (or
 **It stops with "reco.user_profiles is the backend's old table".**
 The database has the API's migrations up to V7 only: V8 drops that old table so the recommender can create its own. Update the API and run its migrations.
 
+**It stops with "no read-write rights on reco tables …".**
+The `reco` tables belong to a role whose rights the recommender's role does not have, typically after a dump restored with `pg_restore --no-owner`: the tables then belong to the restoring role, and PostgreSQL restores the schema's default privileges only after them. Restore without `--no-owner` once the login role exists (the tables go back to it), or give them back: `ALTER TABLE reco.<table> OWNER TO reco_service` for each table named.
+
 **The api answers `items: []` for everyone.**
 The catalogue is empty: no article has an embedding of the current model yet (start the worker and wait for it to encode), or every article is older than 14 days (`MAX_AGE_DAYS`). The API's `dev` sample articles are dated at their migration and age out: the end-to-end seed republishes them. `/healthz` gives the catalogue size.
 

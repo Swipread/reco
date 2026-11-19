@@ -114,6 +114,14 @@ def test_ensure_schema_refuses_the_backends_old_user_profiles(reco_dsn, conn):
         s.close()
 
 
+def test_ensure_schema_names_the_reco_tables_it_has_no_rights_on(store, conn):
+    # As after a restore with --no-owner: owned by another role, no grant to the group.
+    conn.execute("ALTER TABLE reco.feed_items OWNER TO postgres")
+    conn.execute("REVOKE ALL ON reco.feed_items FROM swipread_reco")
+    with pytest.raises(SchemaError, match="no read-write rights on reco tables feed_items:"):
+        store.ensure_schema()
+
+
 def test_stream_consumer_builds_and_deletes_profiles_in_the_database(store, seed, conn):
     redis = fakeredis.FakeRedis(decode_responses=True)
     consumer = StreamConsumer(redis, store, Params(), lambda: NOW)
