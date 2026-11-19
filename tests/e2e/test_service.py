@@ -16,7 +16,7 @@ from .seed import EXTRA_IDS, EXTRA_PAIRS
 
 pytestmark = pytest.mark.e2e
 
-RECO_TABLES = {"feed_requests", "feed_items", "article_embeddings"}
+RECO_TABLES = {"feed_requests", "feed_items", "article_embeddings", "user_profiles"}
 BACKEND_TIMEOUT_S = 0.300   # swipread.reco.timeout
 SPEC_TARGET_S = 0.150       # spec 8.3
 LATENCY_CALLS = 30

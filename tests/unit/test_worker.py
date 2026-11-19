@@ -166,3 +166,42 @@ def test_worker_loop_runs_each_activity_at_its_own_period(store, redis, monkeypa
     assert calls["purge"] == [NOW, NOW + timedelta(seconds=3600)]
     assert calls["fallback"] == [NOW + timedelta(seconds=600 * k) for k in range(7)]
     assert calls["encode"] == [NOW + timedelta(seconds=15 * k) for k in range(241)]
+
+
+class FakeStream:
+    """Injected stream: each poll spends its timeout on the clock; StopAfter-like budget."""
+
+    def __init__(self, clock: FakeClock, *, seconds: float) -> None:
+        self.clock = clock
+        self.left = seconds
+        self.polls: list[float] = []
+        self.retries: list[datetime] = []
+
+    def poll(self, timeout_s: float) -> int:
+        assert 0 <= timeout_s <= worker.STREAM_BLOCK_MAX_S
+        self.polls.append(timeout_s)
+        self.clock.advance(timeout_s)
+        self.left -= timeout_s
+        if self.left < 0:
+            raise _Stop
+        return 0
+
+    def retry_pending(self) -> int:
+        self.retries.append(self.clock())
+        return 0
+
+
+def test_worker_loop_waits_on_the_stream_and_retries_its_pending_messages(store, redis, monkeypatch):
+    monkeypatch.setattr(worker, "encode_pending", lambda s, e, now: None)
+    monkeypatch.setattr(worker, "write_fallback", lambda s, r, now, p: None)
+    monkeypatch.setattr(worker, "run_purge", lambda s, now: None)
+    clock = FakeClock(NOW)
+    stream = FakeStream(clock, seconds=121)
+
+    def no_sleep(seconds: float) -> None:
+        raise AssertionError("with a stream, the loop waits on it")
+
+    with pytest.raises(_Stop):
+        run_worker(store, redis, FakeEncoder(), Params(), clock, no_sleep, stream)
+    assert stream.retries == [NOW + timedelta(seconds=60 * k) for k in range(3)]
+    assert len(stream.polls) > 60

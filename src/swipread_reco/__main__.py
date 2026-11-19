@@ -2,7 +2,8 @@
 
 Both read RECO_DATABASE_URL, RECO_REDIS_URL, RECO_DB_TIMEOUT_S (default 2) and the RECO_*
 overrides of Params; the api also reads RECO_HOST (default 127.0.0.1) and RECO_PORT
-(default 8081, the backend's default swipread.reco.base-url).
+(default 8081, the backend's default swipread.reco.base-url), the worker RECO_STREAM_CONSUMER
+(default `worker`, its name in the consumer group `reco` of the `events` stream).
 """
 
 import argparse
@@ -20,6 +21,7 @@ from swipread_reco.params import Params
 from swipread_reco.store import DEFAULT_POOL_TIMEOUT_S, PgStore
 from swipread_reco.worker import run_worker
 from swipread_reco.worker.encode import E5Encoder
+from swipread_reco.worker.stream import DEFAULT_CONSUMER, StreamConsumer
 
 # The routes are unauthenticated and reachable from the internal network only (spec 9.2):
 # listen on loopback unless RECO_HOST says otherwise (e.g. 0.0.0.0 inside a container).
@@ -71,7 +73,10 @@ def run_worker_process() -> None:
     )
     try:
         store.ensure_schema()  # encode and purge need the reco tables even if the api never ran
-        run_worker(store, client, E5Encoder(), params, utcnow, time.sleep)
+        stream = StreamConsumer(
+            client, store, params, utcnow, os.environ.get("RECO_STREAM_CONSUMER", DEFAULT_CONSUMER)
+        )
+        run_worker(store, client, E5Encoder(), params, utcnow, time.sleep, stream)
     finally:
         client.close()
         store.close()
