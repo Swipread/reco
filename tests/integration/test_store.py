@@ -1,6 +1,7 @@
 """PgStore against a real PostgreSQL (fixtures in conftest.py)."""
 
 import dataclasses
+import threading
 from datetime import timedelta
 
 import numpy as np
@@ -266,3 +267,29 @@ def test_purge_removes_embeddings_of_deleted_articles(store, seed, conn):
     store.purge(NOW, 30)
     kept = conn.execute("SELECT article_id FROM reco.article_embeddings ORDER BY 1").fetchall()
     assert [k for (k,) in kept] == ["a_ok", "a_old", "a_othermodel"]
+
+
+def test_ensure_schema_is_safe_when_both_processes_start_together(reco_dsn):
+    # The api and the worker start at the same time on a database without the reco tables:
+    # concurrent CREATE TABLE IF NOT EXISTS fail in PostgreSQL unless they are serialized.
+    stores = [PgStore(reco_dsn) for _ in range(6)]
+    barrier = threading.Barrier(len(stores))
+    errors: list[Exception] = []
+
+    def start(s: PgStore) -> None:
+        barrier.wait()
+        try:
+            s.ensure_schema()
+        except Exception as e:  # noqa: BLE001 - collected for the assertion
+            errors.append(e)
+
+    threads = [threading.Thread(target=start, args=(s,)) for s in stores]
+    try:
+        for t in threads:
+            t.start()
+        for t in threads:
+            t.join()
+    finally:
+        for s in stores:
+            s.close()
+    assert errors == []

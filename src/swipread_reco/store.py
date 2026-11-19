@@ -54,6 +54,9 @@ RECOMMENDABLE_WHERE = """
 
 # The service's own tables. Schema `reco` and the `vector` extension come from the backend's
 # migration V1; the restricted role (V5) may create tables in `reco` but not schemas.
+# Advisory lock taken by ensure_schema (any constant shared by the two processes).
+SCHEMA_LOCK_KEY = 0x5245434F  # "RECO"
+
 RECO_SCHEMA = """
 CREATE TABLE IF NOT EXISTS reco.feed_requests (
   request_id      text PRIMARY KEY,
@@ -291,6 +294,9 @@ class PgStore:
         Runs on its own connection: the pooled ones need the `vector` type to start.
         """
         with psycopg.connect(self._dsn, connect_timeout=max(1, round(self._timeout_s))) as conn:
+            # The api and the worker start together: concurrent CREATE TABLE IF NOT EXISTS
+            # collide in PostgreSQL (duplicate pg_type entry). One at a time, until commit.
+            conn.execute("SELECT pg_advisory_xact_lock(%s)", (SCHEMA_LOCK_KEY,))
             has_reco, has_vector = conn.execute(
                 "SELECT to_regnamespace('reco') IS NOT NULL, to_regtype('vector') IS NOT NULL"
             ).fetchone()
