@@ -43,8 +43,8 @@ class FakeStore:
         self._deleted: set[str] = set()
         # worker
         self.pending: list[tuple[str, str, str]] = []   # (id, title, summary) in app.articles
-        self.written: dict[str, np.ndarray] = {}        # id -> embedding written
-        self.written_models: dict[str, str] = {}        # id -> embedding_model written
+        self.written: dict[str, np.ndarray] = {}        # reco.article_embeddings: id -> embedding
+        self.written_models: dict[str, str] = {}        # reco.article_embeddings: id -> model
         self.written_model: str | None = None           # model of the last write_embeddings()
         self.written_at: datetime | None = None         # `now` of the last write_embeddings()
         self.encode_calls = 0                           # articles_to_embed() calls
@@ -83,6 +83,11 @@ class FakeStore:
     def _exists(self, article_id: str) -> bool:
         return article_id in self.sim.catalog.index and article_id not in self._deleted
 
+    def _in_app(self, article_id: str) -> bool:
+        """In app.articles: a catalog article or a pending one, not deleted."""
+        listed = article_id in self.sim.catalog.index or any(p[0] == article_id for p in self.pending)
+        return listed and article_id not in self._deleted
+
     # Store
 
     def ensure_schema(self) -> None:
@@ -103,7 +108,8 @@ class FakeStore:
     def events(self, user_id: str, limit: int) -> list[Event]:
         self._check()
         self.events_limit = limit
-        ordered = sorted(self.user_events.get(user_id, []), key=lambda e: e.occurred_at)
+        with_article = [e for e in self.user_events.get(user_id, []) if e.article_id is not None]
+        ordered = sorted(with_article, key=lambda e: e.occurred_at)
         return ordered[-limit:] if limit > 0 else []
 
     def user_article_ids(self, user_id: str) -> frozenset[str]:
@@ -165,13 +171,18 @@ class FakeStore:
         return {i: f"Title {i}" for i in ids if self._exists(i)}
 
     def articles_to_embed(self, model: str, limit: int) -> list[tuple[str, str, str]]:
+        """Pending articles without a `model` embedding (none, or one of another model)."""
         self._check()
         self.encode_calls += 1
-        return [p for p in self.pending if self.written_models.get(p[0]) != model][:limit]
+        return [
+            p for p in self.pending
+            if self.written_models.get(p[0]) != model and p[0] not in self._deleted
+        ][:limit]
 
     def write_embeddings(
         self, rows: Sequence[tuple[str, np.ndarray]], model: str, now: datetime
     ) -> None:
+        """Upsert: an article keeps one embedding, of the last model written."""
         self._check()
         for article_id, embedding in rows:
             self.written[article_id] = embedding
@@ -189,7 +200,8 @@ class FakeStore:
         return [r.id for r in rows[:limit]]
 
     def purge(self, now: datetime, retention_days: int) -> int:
-        """Delete saved lots older than `retention_days` or of users gone from `locales`."""
+        """Delete saved lots older than `retention_days` or of users gone from `locales`, and
+        written embeddings of articles gone from app.articles; the number of lots deleted."""
         self._check()
         if self.fail_purge:
             raise StoreDown("purge failed")
@@ -201,6 +213,9 @@ class FakeStore:
         ]
         for request_id in gone:
             del self.lots[request_id]
+        for article_id in [i for i in self.written if not self._in_app(i)]:
+            del self.written[article_id]
+            del self.written_models[article_id]
         return len(gone)
 
 

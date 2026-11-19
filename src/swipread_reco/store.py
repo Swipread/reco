@@ -5,6 +5,7 @@ from datetime import datetime
 from typing import Any, Protocol
 
 import numpy as np
+import psycopg
 from pgvector import Vector
 from pgvector.psycopg import register_vector
 from psycopg import Connection
@@ -13,13 +14,15 @@ from psycopg.types.json import Jsonb
 from psycopg_pool import ConnectionPool
 
 from swipread_reco.models import CatalogRow, Event, Lot, Topic
-from swipread_reco.params import MODEL_VERSION, Params
+from swipread_reco.params import EMBEDDING_MODEL, MODEL_VERSION, Params
 
 # Longest wait for a pooled connection (infrastructure setting, not a spec 10 parameter).
 DEFAULT_POOL_TIMEOUT_S = 2.0
 
 # Every event type the profile reads; `impression` is left out (spec 4.1).
-PROFILE_EVENT_TYPES = ["view", "open", "read", "like", "unlike", "save", "share", "hide"]
+PROFILE_EVENT_TYPES = [
+    "view", "open", "read", "like", "unlike", "save", "unsave", "share", "hide",
+]
 
 # Main topic of each article: highest confidence, then lowest topic_id.
 PRIMARY_TOPIC = """
@@ -28,18 +31,20 @@ PRIMARY_TOPIC = """
     ORDER BY article_id, confidence DESC, topic_id
 """
 
-# Recommendable articles (spec 8.2), except the embedding condition.
-RECOMMENDABLE = f"""
+# Recommendable articles (spec 8.2), except the embedding condition: FROM part, WHERE part.
+# The backend has no article status: every article of an active source counts as active.
+RECOMMENDABLE_FROM = f"""
     FROM app.articles a
     JOIN app.sources s ON s.id = a.source_id AND s.active
     JOIN ({PRIMARY_TOPIC}) p ON p.article_id = a.id
-    WHERE a.status = 'active'
-      AND a.published_at >= %(now)s - make_interval(days => %(max_age_days)s)
+"""
+RECOMMENDABLE_WHERE = """
+    WHERE a.published_at >= %(now)s - make_interval(days => %(max_age_days)s)
 """
 
+# The service's own tables. Schema `reco` and the `vector` extension come from the backend's
+# migration V1; the restricted role (V5) may create tables in `reco` but not schemas.
 RECO_SCHEMA = """
-CREATE SCHEMA IF NOT EXISTS reco;
-
 CREATE TABLE IF NOT EXISTS reco.feed_requests (
   request_id      text PRIMARY KEY,
   user_id         text NOT NULL,
@@ -64,7 +69,19 @@ CREATE TABLE IF NOT EXISTS reco.feed_items (
   explanation jsonb NOT NULL,
   PRIMARY KEY (request_id, position)
 );
+
+-- Embeddings live here: the role cannot write to app (no FK either, no REFERENCES right on app).
+CREATE TABLE IF NOT EXISTS reco.article_embeddings (
+  article_id  text PRIMARY KEY,
+  embedding   vector(384) NOT NULL,
+  model       text NOT NULL,
+  embedded_at timestamptz NOT NULL
+);
 """
+
+
+class SchemaError(RuntimeError):
+    """The database lacks what the backend's migrations should have created."""
 
 
 class Store(Protocol):
@@ -119,12 +136,16 @@ def _array(vector: Vector) -> np.ndarray:
 class PgStore:
     """Store backed by a psycopg connection pool, sessions in UTC, pgvector registered.
 
-    The `vector` extension must exist before the pool connects (sql/app_schema.sql).
+    The `vector` extension must exist before the pool connects (the backend's migration V1).
+    The connecting role needs only the rights of the backend's `swipread_reco` group (V5):
+    SELECT on `app`, table creation and read-write on `reco`; nothing is ever written to `app`.
     A method that gets no connection within `timeout_s` raises psycopg_pool.PoolTimeout,
     so an unreachable database fails a request quickly (the backend gives up at 300 ms).
     """
 
     def __init__(self, dsn: str, timeout_s: float = DEFAULT_POOL_TIMEOUT_S) -> None:
+        self._dsn = dsn
+        self._timeout_s = timeout_s
         self._pool = ConnectionPool(
             dsn, kwargs={"options": "-c timezone=UTC"}, configure=_configure,
             timeout=timeout_s, open=True,
@@ -134,7 +155,24 @@ class PgStore:
         self._pool.close()
 
     def ensure_schema(self) -> None:
-        with self._pool.connection() as conn:
+        """Create the reco tables if missing; SchemaError if schema `reco` or type `vector` is.
+
+        Runs on its own connection: the pooled ones need the `vector` type to start.
+        """
+        with psycopg.connect(self._dsn, connect_timeout=max(1, round(self._timeout_s))) as conn:
+            has_reco, has_vector = conn.execute(
+                "SELECT to_regnamespace('reco') IS NOT NULL, to_regtype('vector') IS NOT NULL"
+            ).fetchone()
+            if not has_reco:
+                raise SchemaError(
+                    "schema reco is missing: it is created by the backend's migration V1"
+                    " (Swipread/api), run the backend migrations first"
+                )
+            if not has_vector:
+                raise SchemaError(
+                    "type vector is missing: the pgvector extension is created by the backend's"
+                    " migration V1 (Swipread/api), run the backend migrations first"
+                )
             conn.execute(RECO_SCHEMA)
 
     def topics(self) -> list[Topic]:
@@ -162,7 +200,7 @@ class PgStore:
                 WITH recent AS (
                   SELECT event_id, type, article_id, occurred_at, received_at, payload
                   FROM app.events
-                  WHERE user_id = %s AND type = ANY(%s)
+                  WHERE user_id = %s AND type = ANY(%s) AND article_id IS NOT NULL
                   ORDER BY occurred_at DESC, event_id DESC
                   LIMIT %s
                 )
@@ -198,14 +236,16 @@ class PgStore:
         return frozenset(r[0] for r in rows)
 
     def embeddings(self, ids: Sequence[str]) -> dict[str, np.ndarray]:
-        """Embeddings of the given articles; unknown or not yet encoded ones are left out."""
+        """EMBEDDING_MODEL embeddings of the given articles; articles gone from app.articles
+        or not yet encoded by that model are left out."""
         if not ids:
             return {}
         with self._pool.connection() as conn:
             rows = conn.execute(
-                "SELECT id, embedding FROM app.articles"
-                " WHERE id = ANY(%s) AND embedding IS NOT NULL",
-                (list(ids),),
+                "SELECT e.article_id, e.embedding FROM reco.article_embeddings e"
+                " JOIN app.articles a ON a.id = e.article_id"
+                " WHERE e.article_id = ANY(%s) AND e.model = %s",
+                (list(ids), EMBEDDING_MODEL),
             ).fetchall()
         return {i: _array(emb) for i, emb in rows}
 
@@ -217,25 +257,29 @@ class PgStore:
         return row[0]
 
     def catalog_rows(self, now: datetime, max_age_days: int) -> list[CatalogRow]:
-        """Recommendable articles with an embedding (spec 8.2), by id."""
+        """Recommendable articles with an EMBEDDING_MODEL embedding (spec 8.2), by id.
+
+        `cluster_id` is always None: the backend has no such column, so same-story detection
+        rests on similarity alone (spec 7.2).
+        """
         with self._pool.connection() as conn:
             rows = conn.execute(
                 f"""
                 SELECT a.id, p.topic_id, a.source_id, lower(left(a.language, 2)),
-                       a.cluster_id, a.published_at, a.embedding
-                {RECOMMENDABLE}
-                  AND a.embedding IS NOT NULL
+                       a.published_at, e.embedding
+                {RECOMMENDABLE_FROM}
+                JOIN reco.article_embeddings e ON e.article_id = a.id AND e.model = %(model)s
+                {RECOMMENDABLE_WHERE}
                 ORDER BY a.id
                 """,
-                {"now": now, "max_age_days": max_age_days},
+                {"now": now, "max_age_days": max_age_days, "model": EMBEDDING_MODEL},
             ).fetchall()
         return [
             CatalogRow(
                 id=i, topic_id=topic_id, source_id=source_id, language=language,
-                cluster_id=cluster_id, published_at=published_at,
-                embedding=_array(emb),
+                cluster_id=None, published_at=published_at, embedding=_array(emb),
             )
-            for i, topic_id, source_id, language, cluster_id, published_at, emb in rows
+            for i, topic_id, source_id, language, published_at, emb in rows
         ]
 
     def save_lot(
@@ -296,12 +340,14 @@ class PgStore:
         return dict(rows)
 
     def articles_to_embed(self, model: str, limit: int) -> list[tuple[str, str, str]]:
-        """(id, title, summary) of articles not encoded by `model`, newest ingested first."""
+        """(id, title, summary) of articles without a `model` row in reco.article_embeddings
+        (none, or one of another model), newest ingested first."""
         with self._pool.connection() as conn:
             rows = conn.execute(
-                "SELECT id, title, summary FROM app.articles"
-                " WHERE embedding IS NULL OR embedding_model IS DISTINCT FROM %s"
-                " ORDER BY ingested_at DESC, id LIMIT %s",
+                "SELECT a.id, a.title, a.summary FROM app.articles a"
+                " WHERE NOT EXISTS (SELECT 1 FROM reco.article_embeddings e"
+                "                   WHERE e.article_id = a.id AND e.model = %s)"
+                " ORDER BY a.ingested_at DESC, a.id LIMIT %s",
                 (model, limit),
             ).fetchall()
         return [tuple(r) for r in rows]
@@ -309,13 +355,16 @@ class PgStore:
     def write_embeddings(
         self, rows: Sequence[tuple[str, np.ndarray]], model: str, now: datetime
     ) -> None:
+        """Upsert into reco.article_embeddings: one row per article, the latest model wins."""
         if not rows:
             return
         with self._pool.connection() as conn, conn.cursor() as cur:
             cur.executemany(
-                "UPDATE app.articles SET embedding = %s, embedding_model = %s, embedded_at = %s"
-                " WHERE id = %s",
-                [(np.asarray(emb, dtype=np.float32), model, now, i) for i, emb in rows],
+                "INSERT INTO reco.article_embeddings (article_id, embedding, model, embedded_at)"
+                " VALUES (%s, %s, %s, %s)"
+                " ON CONFLICT (article_id) DO UPDATE SET embedding = EXCLUDED.embedding,"
+                " model = EXCLUDED.model, embedded_at = EXCLUDED.embedded_at",
+                [(i, np.asarray(emb, dtype=np.float32), model, now) for i, emb in rows],
             )
 
     def fallback_ids(
@@ -326,7 +375,8 @@ class PgStore:
             rows = conn.execute(
                 f"""
                 SELECT a.id
-                {RECOMMENDABLE}
+                {RECOMMENDABLE_FROM}
+                {RECOMMENDABLE_WHERE}
                   AND p.topic_id = %(topic_id)s
                 ORDER BY a.published_at DESC, a.id
                 LIMIT %(limit)s
@@ -336,12 +386,17 @@ class PgStore:
         return [r[0] for r in rows]
 
     def purge(self, now: datetime, retention_days: int) -> int:
-        """Delete requests older than `retention_days` or of users gone from app.users (8.7)."""
-        with self._pool.connection() as conn:
+        """Delete requests older than `retention_days` or of users gone from app.users (8.7),
+        and embeddings of articles gone from app.articles; the number of requests deleted."""
+        with self._pool.connection() as conn, conn.transaction():
             cur = conn.execute(
                 "DELETE FROM reco.feed_requests r"
                 " WHERE r.generated_at < %s - make_interval(days => %s)"
                 " OR NOT EXISTS (SELECT 1 FROM app.users u WHERE u.id = r.user_id)",
                 (now, retention_days),
+            )
+            conn.execute(
+                "DELETE FROM reco.article_embeddings e"
+                " WHERE NOT EXISTS (SELECT 1 FROM app.articles a WHERE a.id = e.article_id)"
             )
             return cur.rowcount

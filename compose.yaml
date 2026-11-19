@@ -1,6 +1,6 @@
 services:
   postgres:
-    image: pgvector/pgvector:pg16
+    image: pgvector/pgvector:pg17  # same image as the backend (Swipread/api compose.yaml)
     environment:
       POSTGRES_USER: postgres
       POSTGRES_PASSWORD: postgres
@@ -14,7 +14,7 @@ services:
       retries: 15
 
   redis:
-    image: redis:7
+    image: redis:7.4  # same image as the backend
     ports:
       - "6380:6379"
     healthcheck:

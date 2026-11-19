@@ -10,7 +10,7 @@ from psycopg.types.json import Jsonb
 
 from swipread_reco.models import Lot, LotItem, Profile, ProfileItem
 from swipread_reco.params import EMBEDDING_MODEL, MODEL_VERSION, Params
-from swipread_reco.store import PgStore
+from swipread_reco.store import PgStore, SchemaError
 
 from .helpers import NOW, unit_vector
 
@@ -18,7 +18,7 @@ pytestmark = pytest.mark.integration
 
 
 def insert_event(
-    conn: psycopg.Connection, event_id: str, type_: str, article_id: str,
+    conn: psycopg.Connection, event_id: str, type_: str, article_id: str | None,
     hours_ago: float, user_id: str = "u_1", payload: dict | None = None,
 ) -> None:
     occurred = NOW - timedelta(hours=hours_ago)
@@ -60,9 +60,31 @@ def save(store: PgStore, request_id: str, user_id: str, generated_at, ids=("a_ok
     )
 
 
-def test_ensure_schema_is_idempotent(store):
+def test_ensure_schema_creates_the_reco_tables_as_the_restricted_role(store, conn):
     store.ensure_schema()
     store.ensure_schema()
+    owned = conn.execute(
+        "SELECT tablename FROM pg_tables WHERE schemaname = 'reco' AND tableowner = 'reco_test'"
+        " ORDER BY 1"
+    ).fetchall()
+    assert [t for (t,) in owned] == ["article_embeddings", "feed_items", "feed_requests"]
+
+
+def test_ensure_schema_fails_clearly_without_schema_reco(reco_dsn, conn):
+    conn.execute("DROP SCHEMA reco CASCADE")
+    s = PgStore(reco_dsn)
+    try:
+        with pytest.raises(SchemaError, match="schema reco is missing.*migration"):
+            s.ensure_schema()
+    finally:
+        s.close()
+
+
+def test_the_store_role_cannot_write_app_nor_read_private_columns(store, reco_dsn):
+    with psycopg.connect(reco_dsn) as c, pytest.raises(psycopg.errors.InsufficientPrivilege):
+        c.execute("SELECT email FROM app.users")
+    with psycopg.connect(reco_dsn) as c, pytest.raises(psycopg.errors.InsufficientPrivilege):
+        c.execute("UPDATE app.articles SET title = title")
 
 
 def test_user_locale_and_topics(store, seed):
@@ -83,7 +105,7 @@ def test_catalog_rows_apply_every_filter(store, seed):
     rows = store.catalog_rows(NOW, 14)
     assert [r.id for r in rows] == ["a_ok"]
     row = rows[0]
-    assert (row.source_id, row.language, row.cluster_id) == (1, "fr", "c_a_ok")
+    assert (row.source_id, row.language, row.cluster_id) == (1, "fr", None)
     assert row.published_at == NOW - timedelta(days=1)
     assert row.embedding.dtype == np.float32
     np.testing.assert_allclose(row.embedding, unit_vector(0), rtol=1e-6)
@@ -103,6 +125,7 @@ def test_events_are_limited_to_most_recent_and_carry_topic(store, seed, conn):
     insert_event(conn, "e_3", "read", "a_ok", 3, payload={"readMs": 9000, "scrollDepth": 0.9})
     insert_event(conn, "e_4", "like", "a_ok", 2)
     insert_event(conn, "e_5", "hide", "a_gone", 1, payload={"reason": "boring"})
+    insert_event(conn, "e_6", "open", None, 0.5)    # article_id is nullable: never returned
     events = store.events("u_1", 3)
     assert sorted(e.event_id for e in events) == ["e_3", "e_4", "e_5"]
     by_id = {e.event_id: e for e in events}
@@ -115,15 +138,24 @@ def test_events_are_limited_to_most_recent_and_carry_topic(store, seed, conn):
     assert (gone.topic_id, gone.word_count) == (None, None)
 
 
-def test_impressions_are_not_returned(store, seed, conn):
+def test_impressions_are_not_returned_unsave_is(store, seed, conn):
     insert_event(conn, "e_1", "impression", "a_ok", 2)
     insert_event(conn, "e_2", "view", "a_ok", 1, payload={"dwellMs": 300})
     insert_event(conn, "e_3", "like", "a_ok", 1, user_id="u_other")
-    assert [e.event_id for e in store.events("u_1", 10)] == ["e_2"]
+    insert_event(conn, "e_4", "unsave", "a_ok", 0.5)
+    insert_event(conn, "e_5", "read", "a_ok", 0.4, payload={"readMs": 9000})
+    assert [(e.event_id, e.type) for e in store.events("u_1", 10)] == [
+        ("e_2", "view"), ("e_4", "unsave"), ("e_5", "read")
+    ]
 
 
-def test_embeddings_roundtrip_and_skip_missing(store, seed):
-    found = store.embeddings(["a_ok", "a_noemb", "a_nope"])
+def test_embeddings_roundtrip_and_skip_missing(store, seed, conn):
+    conn.execute(
+        "INSERT INTO reco.article_embeddings VALUES ('a_nope', %s, %s, %s)",
+        (unit_vector(9), EMBEDDING_MODEL, NOW),
+    )
+    # a_noemb has only app.articles.embedding, a_othermodel another model, a_nope no article.
+    found = store.embeddings(["a_ok", "a_noemb", "a_othermodel", "a_nope"])
     assert set(found) == {"a_ok"}
     assert found["a_ok"].dtype == np.float32
     np.testing.assert_allclose(found["a_ok"], unit_vector(0), rtol=1e-6)
@@ -178,29 +210,40 @@ def test_save_lot_is_one_transaction(store, seed):
 
 
 def test_articles_to_embed_and_write(store, seed, conn):
+    # Without an embedding (a_noemb) or with one of another model (a_othermodel), newest first.
     assert store.articles_to_embed(EMBEDDING_MODEL, 10) == [
-        ("a_noemb", "Title a_noemb", "Summary a_noemb")
+        ("a_noemb", "Title a_noemb", "Summary a_noemb"),
+        ("a_othermodel", "Title a_othermodel", "Summary a_othermodel"),
     ]
     # Another model: every article, most recently ingested first.
     assert [a[0] for a in store.articles_to_embed("other-model", 3)] == [
         "a_notopic", "a_inactive", "a_old"
     ]
+    app_before = conn.execute("SELECT id, embedding FROM app.articles ORDER BY id").fetchall()
 
-    store.write_embeddings([("a_noemb", unit_vector(42))], EMBEDDING_MODEL, NOW)
+    later = NOW + timedelta(hours=1)
+    store.write_embeddings(
+        [("a_noemb", unit_vector(42)), ("a_othermodel", unit_vector(43))], EMBEDDING_MODEL, later
+    )
 
     assert store.articles_to_embed(EMBEDDING_MODEL, 10) == []
     np.testing.assert_allclose(
         store.embeddings(["a_noemb"])["a_noemb"], unit_vector(42), rtol=1e-6
     )
-    model, embedded_at = conn.execute(
-        "SELECT embedding_model, embedded_at FROM app.articles WHERE id = 'a_noemb'"
-    ).fetchone()
-    assert (model, embedded_at) == (EMBEDDING_MODEL, NOW)
+    rows = conn.execute(
+        "SELECT article_id, model, embedded_at FROM reco.article_embeddings"
+        " WHERE article_id IN ('a_noemb', 'a_othermodel') ORDER BY article_id"
+    ).fetchall()
+    assert rows == [("a_noemb", EMBEDDING_MODEL, later), ("a_othermodel", EMBEDDING_MODEL, later)]
+    # The upsert replaced a_othermodel's old-model row; app.articles is untouched.
+    assert [r.id for r in store.catalog_rows(NOW, 14)] == ["a_noemb", "a_ok", "a_othermodel"]
+    assert conn.execute("SELECT id, embedding FROM app.articles ORDER BY id").fetchall() == app_before
 
 
 def test_fallback_ids_newest_first(store, seed):
-    # Topic 1, active, recent, live source: a_noemb (1 h old) and a_ok (1 day old).
-    assert store.fallback_ids(1, NOW, 14, 10) == ["a_noemb", "a_ok"]
+    # Topic 1, recent, live source, encoded or not: a_noemb (1 h old), a_ok and a_othermodel
+    # (1 day old, by id).
+    assert store.fallback_ids(1, NOW, 14, 10) == ["a_noemb", "a_ok", "a_othermodel"]
     assert store.fallback_ids(1, NOW, 14, 1) == ["a_noemb"]
     assert store.fallback_ids(3, NOW, 14, 10) == []
 
@@ -214,3 +257,10 @@ def test_purge_removes_old_and_orphans(store, seed, conn):
     assert store.request("r_new") is not None
     (items,) = conn.execute("SELECT count(*) FROM reco.feed_items").fetchone()
     assert items == 1
+
+
+def test_purge_removes_embeddings_of_deleted_articles(store, seed, conn):
+    conn.execute("DELETE FROM app.articles WHERE id IN ('a_notopic', 'a_inactive')")
+    store.purge(NOW, 30)
+    kept = conn.execute("SELECT article_id FROM reco.article_embeddings ORDER BY 1").fetchall()
+    assert [k for (k,) in kept] == ["a_ok", "a_old", "a_othermodel"]
