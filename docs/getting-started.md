@@ -86,3 +86,21 @@ The API's `dev` profile includes its `mock-reco` profile: with `dev` or `test`, 
    ```
 
 The API's HTTP client (the JDK's) offers an upgrade to HTTP/2 (`Upgrade: h2c`) on each new connection; uvicorn declines, answers in HTTP/1.1 and logs `Unsupported upgrade request`. The responses are not affected.
+
+## Docker image
+
+The `Dockerfile` builds the production image: one image for both processes, the command choosing which (`api` by default, or `worker`).
+
+```bash
+docker build -t swipread-reco .                        # linux/amd64 on the server: add --platform linux/amd64
+docker run --rm -p 8081:8081 -e RECO_DATABASE_URL=… -e RECO_REDIS_URL=… swipread-reco
+docker run --rm -e RECO_DATABASE_URL=… -e RECO_REDIS_URL=… swipread-reco worker
+```
+
+What the image holds:
+
+- torch built for CPU only: on Linux, `pyproject.toml` takes it from PyTorch's CPU index, which leaves out about 3 GB of CUDA libraries (the same applies to `uv sync` on any Linux machine, CI included);
+- the embedding model at the revision the encoder loads (`HF_REVISION` in `worker/encode.py`), with only the files `SentenceTransformer` reads, and `HF_HUB_OFFLINE=1`: a container never contacts Hugging Face;
+- a non-root user, and `RECO_HOST=0.0.0.0`, `RECO_PORT=8081`.
+
+The image weighs about 2 GB (torch about 800 MB, the model about 470 MB). The tests do not run in it: CI runs them before an image is built. On SIGTERM (`docker stop`) the worker exits at once; an article it was encoding is taken again at the next start, and a stream message it had not acknowledged is read again.
