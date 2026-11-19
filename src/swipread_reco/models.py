@@ -23,8 +23,8 @@ class Topic:
 @dataclass(frozen=True)
 class Event:
     event_id: str
-    type: str                    # view, open, read, like, unlike, save, share, hide
-    article_id: str
+    type: str                    # view, open, read, like, unlike, save, unsave, share, hide
+    article_id: str | None       # app.events.article_id is nullable; such events are ignored
     occurred_at: datetime
     received_at: datetime
     payload: Mapping[str, Any]   # as sent by the front end (api.md)
@@ -80,7 +80,7 @@ class CatalogRow:
     topic_id: int
     source_id: int
     language: str
-    cluster_id: str | None
+    cluster_id: str | None       # always None from PgStore: the backend has no cluster column
     published_at: datetime
     embedding: np.ndarray        # (d,) unit norm
 

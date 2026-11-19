@@ -128,3 +128,61 @@ def test_echo_topic():
 def test_echo_ignored_when_topic_weight_is_zero():
     events = [ev("like", "a", 5, 9, received_minutes_ago=9), ev("hide", "a", 5, 8, received_minutes_ago=8)]
     assert build_profile(events, TOPICS, CHOSEN, NOW, NOW - timedelta(minutes=10), Params()).echo_topic is None
+
+
+def test_unsave_never_triggers_the_echo():
+    last = NOW - timedelta(minutes=10)
+    mk = lambda e: build_profile(e, TOPICS, CHOSEN, NOW, last, Params()).echo_topic
+    assert mk([ev("unsave", "a", 4, 5, received_minutes_ago=5)]) is None
+    assert mk([ev("save", "a", 4, 20, received_minutes_ago=20),
+               ev("unsave", "a", 4, 5, received_minutes_ago=5)]) is None
+
+
+def test_unsave_takes_back_the_value_of_save():
+    events = [ev("open", "a", 4, 15), ev("save", "a", 4, 10), ev("unsave", "a", 4, 5)]
+    p = build_profile(events, TOPICS, CHOSEN, NOW, None, Params())
+    assert [h.type for h in p.history] == ["open", "save", "unsave"]
+    assert [h.delta for h in p.history] == pytest.approx([0.03, 0.05, -0.05])
+    assert {i.article_id: i.strength for i in p.liked} == pytest.approx({"a": 0.375}, rel=1e-3)
+
+
+def read(payload, word_count):
+    return dataclasses.replace(ev("read", "a", 2, 5, payload, 5), word_count=word_count)
+
+
+# The backend's strong read (StrongEventPolicy.java): scrollDepth > 0.8, or readMs (truncated)
+# >= 0.6 x word_count / 230 wpm, never with an unknown or zero word count.
+# 230 words: 60 000 ms expected, threshold 36 000 ms. 1 000 words: threshold 156 521.739… ms.
+@pytest.mark.parametrize("payload, word_count, strong", [
+    ({"readMs": 10, "scrollDepth": 0.81}, 230, True),        # lecture profonde
+    ({"readMs": 10, "scrollDepth": 0.9}, None, True),        # profonde, longueur inconnue
+    ({"readMs": 10**6, "scrollDepth": 0.8}, None, False),    # strictement > 0,8
+    ({"readMs": 0, "scrollDepth": 0.8}, 230, False),
+    ({"readMs": 36000}, 230, True),                          # pas de scrollDepth : borne atteinte
+    ({"readMs": 35999}, 230, False),
+    ({"readMs": 35999.9}, 230, False),                       # readMs tronqué (longValue)
+    ({"readMs": 36000.5}, 230, True),
+    ({"readMs": 36000, "scrollDepth": 0.1}, 230, True),      # longue mais peu défilée
+    ({"readMs": 156521}, 1000, False),
+    ({"readMs": 156522}, 1000, True),
+    ({"readMs": 10**7}, None, False),                        # longueur inconnue
+    ({"readMs": 10**7}, 0, False),                           # longueur nulle
+    ({"readMs": 10**7}, -5, False),
+    ({}, 230, False),                                        # readMs absent compte pour 0
+    ({"readMs": "long"}, 230, False),
+])
+def test_echo_read_rule_mirrors_the_backend(payload, word_count, strong):
+    last = NOW - timedelta(minutes=10)
+    p = build_profile([read(payload, word_count)], TOPICS, CHOSEN, NOW, last, Params())
+    assert (p.echo_topic == 2) is strong
+
+
+def test_events_without_article_are_ignored():
+    events = [
+        ev("like", None, 4, 6, received_minutes_ago=6), ev("hide", None, 1, 5),
+        ev("open", "a", 1, 4),
+    ]
+    p = build_profile(events, TOPICS, CHOSEN, NOW, NOW - timedelta(minutes=10), Params())
+    only = build_profile([events[2]], TOPICS, CHOSEN, NOW, NOW - timedelta(minutes=10), Params())
+    assert p == only
+    assert p.echo_topic is None and p.touched_article_ids == {"a"}

@@ -17,10 +17,15 @@ READING_WPM = 230
 MS_PER_MINUTE = 60_000
 FALLBACK_READ_MS = 60_000
 
-# Definitions fixed by spec 4.4 and the backend contract (not tunables of section 10):
-# the strong positive events that make a topic the echo topic.
+# Definitions fixed by spec 4.4 and the backend (not tunables of section 10): the strong
+# positive events that make a topic the echo topic. A `read` is strong exactly when the
+# backend's StrongEventPolicy says so (Swipread/api @ 7549cf5,
+# src/main/java/swipread/api/event/StrongEventPolicy.java:27-45): scrollDepth strictly above
+# 0.8, or readMs (truncated to an integer) at least 60 % of word_count / 230 wpm, the second
+# condition never holding when word_count is unknown or not positive.
 ECHO_TYPES = frozenset({"like", "save", "share"})
-ECHO_READ_SCROLL_DEPTH = 0.8   # a `read` is strong only with scrollDepth strictly above
+ECHO_READ_SCROLL_DEPTH = 0.8      # StrongEventPolicy.DEEP_READ_THRESHOLD
+ECHO_READ_COMPLETE_RATIO = 0.6    # StrongEventPolicy.COMPLETE_READ_RATIO (230 wpm: READING_WPM)
 
 
 @dataclass(frozen=True)
@@ -83,6 +88,8 @@ def apply_event(state: ArticleState, event: Event, params: Params) -> ArticleSta
             return dataclasses.replace(state, liked=False)
         case "save":
             return dataclasses.replace(state, saved=True)
+        case "unsave":
+            return dataclasses.replace(state, saved=False)
         case "share":
             return dataclasses.replace(state, shared=True)
         case "hide":
@@ -152,14 +159,27 @@ def _apply_delta(
     return {t: v / total for t, v in w.items()}
 
 
+def _is_complete_read(event: Event) -> bool:
+    """The backend's strong `read` (StrongEventPolicy.java:27-45): deep or long enough.
+
+    A missing readMs counts as 0, like EventPayloads.readMs; readMs is truncated like
+    Number.longValue.
+    """
+    depth = _payload_number(event.payload, "scrollDepth")
+    if depth is not None and depth > ECHO_READ_SCROLL_DEPTH:
+        return True
+    if not event.word_count or event.word_count <= 0:
+        return False
+    read_ms = math.floor(_payload_number(event.payload, "readMs") or 0.0)
+    estimated_ms = event.word_count * MS_PER_MINUTE / READING_WPM
+    return read_ms >= ECHO_READ_COMPLETE_RATIO * estimated_ms
+
+
 def _is_strong_positive(event: Event) -> bool:
     """Events that can make a topic the echo topic (spec 4.4)."""
     if event.type in ECHO_TYPES:
         return True
-    if event.type == "read":
-        depth = _payload_number(event.payload, "scrollDepth")
-        return depth is not None and depth > ECHO_READ_SCROLL_DEPTH
-    return False
+    return event.type == "read" and _is_complete_read(event)
 
 
 def build_profile(
@@ -173,12 +193,14 @@ def build_profile(
     """Replay the reader's events into a profile (spec 4.2 to 4.4).
 
     Events are replayed oldest first, ordered by (occurred_at, event_id); an event_id
-    seen twice is applied once. `last_request_at` None makes every event eligible to
-    the echo. Truncation to EVENTS_MAX is the caller's job.
+    seen twice is applied once, an event without article is ignored. `last_request_at`
+    None makes every event eligible to the echo. Truncation to EVENTS_MAX is the caller's job.
     """
     replay: list[Event] = []
     seen: set[str] = set()
     for event in sorted(events, key=lambda e: (e.occurred_at, e.event_id)):
+        if event.article_id is None:   # app.events.article_id is nullable: nothing to fold
+            continue
         if event.event_id not in seen:
             seen.add(event.event_id)
             replay.append(event)

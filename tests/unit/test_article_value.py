@@ -43,6 +43,11 @@ def value(*events):
     ([ev("view", {"dwellMs": 500}), ev("like")], 0.08),            # le positif l'emporte
     ([ev("like"), ev("unlike")], 0.0),                              # A8
     ([ev("open"), ev("like"), ev("unlike")], 0.03),
+    ([ev("save"), ev("unsave")], 0.0),                              # unsave défait save
+    ([ev("open"), ev("save"), ev("unsave")], 0.03),                 # il reste l'ouverture
+    ([ev("like"), ev("save"), ev("unsave")], 0.08),                 # il reste le like
+    ([ev("save"), ev("unsave"), ev("save")], 0.08),
+    ([ev("read", {"readMs": 30000})], 0.05),                        # sans scrollDepth (front web)
     ([ev("like"), ev("hide")], -0.15),
     ([ev("hide"), ev("like")], -0.15),                              # masquage définitif
     ([ev("impression")], 0.0),
