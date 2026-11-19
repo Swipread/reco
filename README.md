@@ -59,7 +59,7 @@ The [API](https://github.com/Swipread/api) owns accounts, articles and events; i
 
 **The echo of a strong signal.** After a like, save, share or complete read, the next batch starts with that topic, unless the stock the API kept already holds a card of it. Without that exception, a series of likes would reduce the feed to one topic.
 
-**Profiles kept fresh, never trusted blindly.** The worker reads the API's `events` stream in its own consumer group and recomputes the profile of each reader who did something, from the event log, which the API writes before publishing. A request uses the stored profile only if it was computed from the same events, topics and parameters; otherwise it replays the log. A batch asked for right after a like therefore always includes it, even if its message has not been read yet. → [Database](docs/database.md)
+**Profiles kept fresh, never trusted blindly.** The worker reads the API's `events` stream in its own consumer group and recomputes the profile of each reader who did something, from the event log, which the API writes before publishing. A request uses the stored profile only if it was computed from the same events, topics and parameters; otherwise it replays the log. A batch asked for right after a like therefore always includes it, even if its message has not been read yet. → [Flows](docs/flows.md#a-strong-signal)
 
 **Nothing kept on a deleted account.** On the API's `user_deleted` message, the worker deletes the reader's profile and saved batches at once; an hourly purge does the same for any account gone from the database, and drops batches older than 30 days.
 
@@ -133,7 +133,7 @@ A report on four simulated readers over 100 cards, page by page, is written by `
 
 ## Configuration
 
-Both processes read their settings from environment variables: `RECO_DATABASE_URL`, `RECO_REDIS_URL`, `RECO_DB_TIMEOUT_S`; the api also `RECO_HOST` and `RECO_PORT`, the worker `RECO_STREAM_CONSUMER`. Every parameter of the algorithm can be overridden with `RECO_<NAME>`, for instance `RECO_P_MAX=0.5`. → [Getting started](docs/getting-started.md#environment-variables)
+Both processes read their settings from environment variables: `RECO_DATABASE_URL`, `RECO_REDIS_URL`, `RECO_DB_TIMEOUT_S`; the api also `RECO_HOST` and `RECO_PORT`, the worker `RECO_STREAM_CONSUMER`. Every parameter of the algorithm can be overridden with `RECO_<NAME>`, for instance `RECO_P_MAX=0.5`. → [Configuration](docs/configuration.md)
 
 ## Project status
 
@@ -143,8 +143,10 @@ The algorithm of the specification is implemented with its acceptance tests and 
 
 | | |
 | --- | --- |
-| **Guides** | [Getting started](docs/getting-started.md) · [Testing](docs/testing.md) · [Database](docs/database.md) |
+| **Guides** | [Getting started](docs/getting-started.md) · [Architecture](docs/architecture.md) · [Flows](docs/flows.md) · [Database](docs/database.md) · [Configuration](docs/configuration.md) · [Testing](docs/testing.md) · [Decisions](docs/decisions.md) · [FAQ](docs/faq.md) · [Glossary](docs/glossary.md) |
 | **Reference** | [Algorithm specification](docs/algo_reco.md) |
+
+Start from the [documentation index](docs/README.md).
 
 ## License
 

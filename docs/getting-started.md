@@ -36,15 +36,7 @@ The worker loads the embedding model `intfloat/multilingual-e5-small` (about 470
 
 ## Environment variables
 
-| Variable | Default | Role |
-| --- | --- | --- |
-| `RECO_DATABASE_URL` | required | PostgreSQL DSN (api and worker) |
-| `RECO_REDIS_URL` | required | Redis URL (api and worker) |
-| `RECO_HOST` | `127.0.0.1` | address the api listens on; `0.0.0.0` in a container |
-| `RECO_PORT` | `8081` | port of the api; the one the API calls by default (`SWIPREAD_RECO_URL=http://localhost:8081`) |
-| `RECO_STREAM_CONSUMER` | `worker` | name of the worker in the consumer group `reco` of the `events` stream; keep it across restarts so that the worker takes back the messages it read but did not acknowledge. One worker at a time |
-| `RECO_DB_TIMEOUT_S` | `2` | longest wait for a PostgreSQL connection, in seconds. Above the API's 300 ms timeout: lower it in production |
-| `RECO_<PARAM>` | values of spec section 10 | override of a field of `Params`, upper-cased, e.g. `RECO_P_MAX=0.5`, `RECO_DUP_SIM=0.85` |
+`RECO_DATABASE_URL` and `RECO_REDIS_URL` are required; the others (`RECO_HOST`, `RECO_PORT`, `RECO_STREAM_CONSUMER`, `RECO_DB_TIMEOUT_S`, the `RECO_<PARAM>` overrides of the algorithm) have defaults. All of them: [Configuration](configuration.md).
 
 ## Database and restricted role
 
@@ -76,7 +68,7 @@ The API's `dev` profile includes its `mock-reco` profile: with `dev` or `test`, 
    java -jar target/api-*.jar
    ```
 
-   `SPRING_FLYWAY_LOCATIONS` adds the `dev` migrations: 8 topics, 300 sample articles, the admin account. The log must say `No active profile set`; a failed call to the recommender leaves `Recommendation service unavailable` in it. Without these locations, Flyway refuses a database that received the `dev` data (« Detected applied migration not resolved locally »), as the API's FAQ explains. Add `SERVER_PORT` if 8080 is taken, `SWIPREAD_CORS_ALLOWED_ORIGINS=http://localhost:5173` for the web app.
+   `SPRING_FLYWAY_LOCATIONS` adds the `dev` migrations: 8 topics, 300 sample articles, the admin account. The log must say `No active profile set`; a failed call to the recommender leaves `Recommendation service unavailable` in it. Without these locations, Flyway refuses a database that received the `dev` data ("Detected applied migration not resolved locally"), as the API's FAQ explains. Add `SERVER_PORT` if 8080 is taken, `SWIPREAD_CORS_ALLOWED_ORIGINS=http://localhost:5173` for the web app.
 
 3. Create the recommender's login role, as a superuser (in this container, `swipread` is one):
 
