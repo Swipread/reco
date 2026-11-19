@@ -1,0 +1,63 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  # Reusable by a future release workflow before an image is built.
+  workflow_call:
+
+permissions:
+  contents: read
+
+# A new push to the same branch or pull request cancels the run in progress.
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  test:
+    name: Lint and test (Python 3.12)
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    services:
+      # The integration tests recreate the backend's schema in this database (sql/app_schema.sql)
+      # and connect as a role of the group swipread_reco. Same image as production.
+      postgres:
+        image: pgvector/pgvector:0.8.7-pg17
+        env:
+          POSTGRES_USER: postgres
+          POSTGRES_PASSWORD: postgres
+          POSTGRES_DB: postgres
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U postgres"
+          --health-interval 2s
+          --health-timeout 3s
+          --health-retries 15
+    env:
+      RECO_TEST_DSN: postgresql://postgres:postgres@localhost:5432/postgres
+    steps:
+      - uses: actions/checkout@v7
+      - uses: astral-sh/setup-uv@v10.3.3
+        with:
+          python-version: "3.12"
+          enable-cache: true
+      - name: Install dependencies
+        run: uv sync --locked
+      - name: Lint
+        run: uv run ruff check
+      # Unit, API, acceptance and integration tests. Left out: perf (A13, timing depends on the
+      # machine) and e2e (needs the real backend and the embedding model: scripts/e2e.sh).
+      - name: Test
+        run: uv run pytest -m "not perf" -q --junitxml=test-results.xml
+      - name: Check that the integration tests ran
+        run: uv run python scripts/check_integration_ran.py test-results.xml
+      - name: Upload test report
+        if: failure()
+        uses: actions/upload-artifact@v7
+        with:
+          name: test-results
+          path: test-results.xml
+          retention-days: 7

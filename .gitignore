@@ -23,3 +23,6 @@ report/
 
 # Internal team documents (backend contract, implementation plan): shared outside git
 notes/
+
+# CI test report
+test-results.xml
