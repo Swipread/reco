@@ -9,6 +9,7 @@ overrides of Params; the api also reads RECO_HOST (default 127.0.0.1) and RECO_P
 import argparse
 import logging
 import os
+import signal
 import time
 from collections.abc import Mapping
 
@@ -64,7 +65,21 @@ def run_api() -> None:
         store.close()
 
 
+def exit_on_sigterm() -> None:
+    """Turn SIGTERM (docker stop) into SystemExit, so that the worker closes its connections.
+
+    As PID 1 in a container, a process without a handler ignores SIGTERM and is killed after
+    the grace period. Work cut short is safe: an article not yet encoded is taken at the next
+    start, a stream message not yet acknowledged is read again.
+    """
+    def stop(signum: int, frame: object) -> None:
+        raise SystemExit(0)
+
+    signal.signal(signal.SIGTERM, stop)
+
+
 def run_worker_process() -> None:
+    exit_on_sigterm()
     params = Params.from_env()
     store = open_store()
     client = redis.Redis.from_url(
