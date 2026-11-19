@@ -1,6 +1,6 @@
 [project]
 name = "swipread-reco"
-version = "0.1.0"
+version = "1.0.0"
 description = "Swipread recommender: topic-weight feed recommendations served to the API"
 readme = "README.md"
 license = { text = "All rights reserved" }
@@ -15,6 +15,8 @@ dependencies = [
     "redis>=5.2",
     "numpy>=2.1",
     "sentence-transformers>=3.3",
+    # Direct dependency so that its source below applies: CPU-only wheels on Linux.
+    "torch>=2.15",
 ]
 
 [dependency-groups]
@@ -24,6 +26,16 @@ dev = [
     "httpx>=0.28",
     "ruff>=0.8",
 ]
+
+# On Linux (CI, the Docker image) torch comes from PyTorch's CPU index: the PyPI wheels pull
+# about 3 GB of CUDA libraries the recommender never uses. Other platforms keep PyPI.
+[tool.uv.sources]
+torch = [{ index = "pytorch-cpu", marker = "sys_platform == 'linux'" }]
+
+[[tool.uv.index]]
+name = "pytorch-cpu"
+url = "https://download.pytorch.org/whl/cpu"
+explicit = true
 
 [build-system]
 requires = ["hatchling"]
