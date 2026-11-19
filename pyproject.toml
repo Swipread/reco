@@ -1,6 +1,6 @@
 [project]
 name = "swipread-reco"
-version = "1.0.0"
+version = "1.0.1"
 description = "Swipread recommender: topic-weight feed recommendations served to the API"
 readme = "README.md"
 license = { text = "All rights reserved" }
