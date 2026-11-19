@@ -1,8 +1,6 @@
-# Recommendation algorithm — specification v1
+# Algorithm
 
-Working document for the team that codes the recommendation service. It replaces the first draft (schemas only). Read it with the backend/recommender contract (an internal document of the teams, shared outside git) and the [API reference of Swipread/api](https://github.com/Swipread/api/blob/main/docs/api.md), which are the reference for the exchanges: where they disagree with this document on an exchange format, they are right.
-
-Section numbers are stable: the code refers to them ("spec 4.2").
+The recommendation algorithm: how a reader's profile is built, how articles are scored, how a batch is allocated between topics and filled, with its parameters and acceptance tests. It is the reference for any change of behaviour; the code cites its sections ("spec 4.2"), whose numbers are stable. How the service runs around it is in [Architecture](architecture.md), [Flows](flows.md) and [Database](database.md); the exchange formats are those of the [API reference of Swipread/api](https://github.com/Swipread/api/blob/main/docs/api.md).
 
 ## 1. Intent
 
@@ -16,14 +14,14 @@ Hence the choice: a fully explicit model (weights per topic and a score formula)
 ### Goals
 
 - The topics chosen at sign-up form the base of the feed; interactions make it evolve.
-- A strong interaction on card n changes the feed from card n+10 on (stock rule decided with the backend; the current backend gives between n+11 and n+20, section 13), and the change is clear: the first recomputed card belongs to the topic just liked, unless a card of that topic already waits in the stock the backend kept (4.4).
+- A strong interaction on card n changes the feed from card n+10 on (stock rule decided with the backend; the current backend gives between n+11 and n+20, see [Decisions](decisions.md#gaps-with-the-backend)), and the change is clear: the first recomputed card belongs to the topic just liked, unless a card of that topic already waits in the stock the backend kept (4.4).
 - An unchosen topic that the reader hides without ever having liked it leaves the feed.
 - Every card served is saved with the breakdown of its score.
 - Quality is measured offline with simulated readers (section 11), which are also the acceptance tests.
 
 ### Out of scope
 
-- A learned ranking model (LightGBM or other), popularity statistics, collaborative filtering, A/B tests, a separate session vector. Section 14 says what we would do with them given traffic.
+- A learned ranking model (LightGBM or other), popularity statistics, collaborative filtering, A/B tests, a separate session vector. [Decisions](decisions.md#with-real-traffic) says what we would do with them given traffic.
 - Consent to personalisation (`app.users.personalization_consent_at`): it does not exist in the API, the service ignores it.
 - The screen that shows the explanations to the jury. The service exposes the data (section 9); how to display it is to be decided.
 
@@ -70,9 +68,9 @@ The profile remains a pure function of the history: the one `reco.user_profiles`
 | Batch | The list of articles returned by a call to `/v1/recommendations`. |
 | Catalogue | The recommendable articles, kept in memory by the service (section 8). |
 
-The `app` schema is the one the backend's migrations create (Swipread/api); [database.md](database.md) lists what the recommender reads from it and defines the four `reco` tables that belong to the service. The service reads `app` read-only, without exception, and writes to `reco`: exactly the rights of the `swipread_reco` role created by the backend (section 13).
+The `app` schema is the one the backend's migrations create (Swipread/api); [database.md](database.md) lists what the recommender reads from it and defines the four `reco` tables that belong to the service. The service reads `app` read-only, without exception, and writes to `reco`: exactly the rights of the `swipread_reco` role created by the backend ([Database](database.md#rights)).
 
-The service depends on the ingestion for two things: articles in `app.articles` and at least one topic per article in `app.article_topics`. The backend has no article status: every article of an active source counts as active. It has no `cluster_id` either: the "same story" rule rests on similarity alone (7.2). Development relies on the synthetic catalogue of section 11 and on the backend's sample articles (section 13).
+The service depends on the ingestion for two things: articles in `app.articles` and at least one topic per article in `app.article_topics`. The backend has no article status: every article of an active source counts as active. It has no `cluster_id` either: the "same story" rule rests on similarity alone (7.2). Development relies on the synthetic catalogue of section 11 and on the backend's sample articles.
 
 All numeric parameters are gathered in section 10. In the text they appear by name (`V_LIKE`, `EPSILON`…).
 
@@ -269,90 +267,60 @@ Stop when the batch holds `count` articles or all topics are exhausted. The batc
 
 ## 8. Service
 
+The rules the service must hold; how it does so is in [Architecture](architecture.md) and [Flows](flows.md).
+
 ### 8.1 General shape
 
-Python 3.12, FastAPI, psycopg 3, redis-py, numpy, sentence-transformers. Two processes from the same package:
+Two processes from one package: **api** (`POST /v1/recommendations`, explanation routes, in-memory catalogue) and **worker** (encoding, fallback lists, purge, `events` stream). The computation of sections 4 to 7 is written as pure functions, without access to the database, Redis or the clock: these dependencies are passed as arguments, which makes the tests of section 11 possible without infrastructure.
 
-- **api**: serves `POST /v1/recommendations` and the explanation routes; keeps the catalogue in memory;
-- **worker**: encodes new articles, writes the fallback lists, purges, and keeps the profiles up to date from the `events` stream (8.6).
+### 8.2 Catalogue
 
-The computation (profile, score, allocation, assembly) is written as pure functions, without access to the database, Redis or the clock: these dependencies are passed as arguments. This is what makes the tests of section 11 possible without infrastructure.
-
-### 8.2 In-memory catalogue
-
-The api process loads the articles that meet: an embedding of the current model in `reco.article_embeddings`, `published_at` within the last `MAX_AGE_DAYS` days, an active source, a main topic. For each: id, source, language, `published_at`, main topic, embedding (`cluster_id` is null, 7.2). Full reload every `CATALOG_REFRESH_S` seconds in the background, with atomic replacement.
-
-At this scale (a few thousand articles), similarities are computed exactly with a numpy matrix product. The recommender does not use pgvector's HNSW index.
-
-If the catalogue is empty, the service answers 200 with `items: []` and the backend serves the fallback feed.
+The recommendable articles are those with an embedding of the current model in `reco.article_embeddings`, `published_at` within the last `MAX_AGE_DAYS` days, an active source and a main topic (`cluster_id` is null, 7.2). The catalogue is reloaded in full every `CATALOG_REFRESH_S` seconds and replaced atomically. Similarities are computed exactly, without an approximate index. An empty catalogue gives `items: []`, and the backend serves its fallback feed.
 
 ### 8.3 `POST /v1/recommendations`
 
 Request and response formats: those of the contract, unchanged.
 
-- `requestId`: `r_` followed by a UUID v4 in hexadecimal.
-- `modelVersion`: `topic-weights-v1`.
+- `requestId`: `r_` followed by a UUID v4 in hexadecimal; `modelVersion`: `topic-weights-v1`.
 - `items`: in display order (the assembly's), not by score.
-- 400 if the request is invalid; 404 if `userId` does not exist in `app.users`; 503 if the database is unreachable.
+- 400 if the request is invalid; 404 if `userId` does not exist in `app.users`; 503 if the database is unreachable. A new reader who has topics gets a real batch from the first call, built on their starting weights.
+- Latency: 95 % of complete responses (reading, computing, saving the batch) under 150 ms with 5,000 articles and 300 events for the reader; the backend gives up at 300 ms. The computation alone must take under 80 ms (test A13).
 
-A new reader who has topics therefore gets a real batch from their first call, built on their starting weights. The 404 only concerns users that do not exist.
+### 8.4 Encoding
 
-Latency target: 95 % of complete responses (reading the events, computing, saving the batch) under 150 ms with 5,000 articles in the catalogue and 300 events for the reader; the backend gives up at 300 ms. The computation alone must take under 80 ms (test A13). If saving the batch makes the target slip, it moves to a background task after the response is sent.
+Every `ENCODE_INTERVAL_S` seconds, up to 64 articles without an embedding of the current model, the most recently ingested first. Model `intfloat/multilingual-e5-small` (384 dimensions) on CPU; text `query: {title}. {summary}`, HTML removed from the summary, truncated to 512 tokens; vector normalised to 1. Nothing is written to `app`: the embeddings go to `reco.article_embeddings` ([Database](database.md)).
 
-### 8.4 Encoding of the articles (worker)
+### 8.5 Fallback lists
 
-Every `ENCODE_INTERVAL_S` seconds, the worker takes up to 64 articles of `app.articles` that have no row of the current model in `reco.article_embeddings` (no row, or a row of another model), the most recently ingested first.
+Every 10 minutes, for each topic, the 50 most recent articles of active sources whose main topic it is, published within the last `MAX_AGE_DAYS` days, in the Redis list `fallback:{slug}` with a TTL of 1 hour, replaced atomically.
 
-- Model: `intfloat/multilingual-e5-small` (384 dimensions), on CPU.
-- Encoded text: `query: {title}. {summary}`, HTML tags removed from the summary, truncated to 512 tokens.
-- Vector normalised to 1, written to `reco.article_embeddings` (one row per article, replaced if it exists) with `model = 'multilingual-e5-small'` and `embedded_at`.
+### 8.6 Stored profiles and the `events` stream
 
-The recommender writes nothing to `app`: the backend's `swipread_reco` role only has `SELECT` there (section 13). The backend's `app.articles.embedding` column is neither read nor written by the recommender. An article becomes recommendable at most `ENCODE_INTERVAL_S + CATALOG_REFRESH_S` seconds after its ingestion, encoding time aside.
+Contract v1.5. The worker reads the `events` stream in the consumer group `reco` and, for each reader with a new event, recomputes the profile from `app.events` (never from the message) and stores the result of the replay (4.2, 4.3) in `reco.user_profiles` with its mark; on `user_deleted` it deletes the reader's profile and batches at once. A request uses the stored profile only if its mark (number of profile events, last `occurred_at` and `event_id`) and its basis (model version, parameters, topics, chosen topics) match the moment; otherwise it replays `app.events` and stores the result. The age factor (4.3) and the echo topic (4.4) are always computed at the request. Details: [Flows](flows.md#a-strong-signal), [Decisions](decisions.md) (ADR-4, ADR-5).
 
-### 8.5 Fallback lists (worker)
+### 8.7 Purge
 
-Every 10 minutes, for each topic: the 50 most recent articles of active sources (`published_at` descending) whose main topic it is, published within the last `MAX_AGE_DAYS` days, written to the Redis list `fallback:{slug}` with a TTL of 1 hour. The replacement is atomic (written to a temporary key, then `RENAME`).
-
-### 8.6 The `events` stream and stored profiles
-
-Contract v1.5. The worker reads the Redis stream `events` in the consumer group `reco`, under a stable name (`RECO_STREAM_CONSUMER`, `worker` by default), in batches of 100, waiting at most 2 seconds between two activities. The group is created at the start of the stream if it does not exist: the first run handles the messages still kept (7 days).
-
-- **A reader's event** (types read by the profile, 4.1): their profile is recomputed once per batch from `app.events`, not from the message, then stored in `reco.user_profiles` with its mark. Replaying from the source of truth makes the handling idempotent and insensitive to the order of arrival: a message received twice or late gives the same profile. `impression` and unknown types are acknowledged without work; an unreadable message is logged and acknowledged.
-- **`user_deleted`**: the reader's profile and batches (`reco.feed_requests`, and `reco.feed_items` by cascade) are deleted at once. A reader absent from `app.users` has no stored profile either.
-- **Acknowledgement**: a profile whose recomputation fails is acknowledged anyway, the next request will recompute it. A deletion that fails stays pending and is taken again every minute (`XREADGROUP` from `0`), like the messages read before a crash; the hourly purge (8.7) erases the same data as a safety net.
-
-What is stored (`reco.user_profiles`, [database.md](database.md)): the result of the replay (4.2, 4.3), that is the weights, the liked and rejected articles with their strength before the age factor, the touched articles and the last 50 weight changes. The age factor (4.3) and the echo topic (4.4) depend on the time and on the previous request: they are computed at each request, the echo on the events received since the previous request only.
-
-**At each request** (`POST /v1/recommendations`, `GET /v1/explain/users/{userId}`), the stored profile is used only if:
-
-- its mark is that of the reader's events in `app.events` (profile types, with an article): number of events, and last event (`occurred_at`, `event_id`) as the contract asks. The number also catches an event committed late with an `occurred_at` older than the mark;
-- its basis is the same: model version, parameters (section 10), list of topics and chosen topics. A change of topics (`PUT /v1/me/topics`) publishes no message: it is seen here.
-
-Otherwise the profile is replayed from `app.events` (mark and events read in one snapshot) and stored. This covers the case v1 feared: the backend asks for a batch right after a strong event, often before the worker has read its message; the request sees the mark is behind and replays. Lost messages (stream trimmed at 7 days, Redis emptied) are covered the same way.
-
-### 8.7 Purge (worker)
-
-Every hour: deletion of the `reco.feed_requests` rows older than 30 days, and of those whose `user_id` no longer exists in `app.users`. The `feed_items` follow by cascade. The profiles (`reco.user_profiles`) of readers absent from `app.users` are deleted in the same pass, as a safety net behind `user_deleted` (8.6). The `reco.article_embeddings` rows whose article no longer exists in `app.articles` are deleted in the same pass. The recommender keeps no other personal data.
+Every hour: batches older than 30 days, batches and profiles of readers gone from `app.users`, embeddings of articles gone from `app.articles`. The recommender keeps no other personal data.
 
 ## 9. Explanation and traceability
 
-### 9.1 Tables
+### 9.1 Saved batches
 
-At start, the service creates its four tables, `reco.feed_requests`, `reco.feed_items`, `reco.article_embeddings` (8.4) and `reco.user_profiles` (8.6), if they do not exist. The `reco` schema and the `vector` extension come from the backend's migrations: the recommender's role cannot create a schema, and the service stops with an explicit message if they are missing, or if `reco.user_profiles` is still the backend's old table (created by its migration V1, dropped by V8). Their definition is in [database.md](database.md). Content of the `jsonb` columns:
+Every batch is saved (`reco.feed_requests`, `reco.feed_items`, [Database](database.md)) with:
 
-- `profile`: `{ "weights": {slug: weight}, "shares": {slug: share after the cap}, "likedCount": n, "rejectedCount": n, "echoTopic": slug or null, "mu": value }`.
-- `params`: the parameters of section 10 as used for this batch.
-- `explanation`: `{ "affinity": x, "freshness": x, "penalty": x, "topicWeight": x, "nearestLiked": [{ "articleId": …, "sim": x }] (3 at most), "nearestRejected": { "articleId": …, "sim": x } or null, "relaxedSource": bool }`.
+- `profile`: `{ "weights": {slug: weight}, "shares": {slug: share after the cap}, "likedCount": n, "rejectedCount": n, "echoTopic": slug or null, "mu": value }`;
+- `params`: the parameters of section 10 as used for this batch;
+- per card, `explanation`: `{ "affinity": x, "freshness": x, "penalty": x, "topicWeight": x, "nearestLiked": [{ "articleId": …, "sim": x }] (3 at most), "nearestRejected": { "articleId": …, "sim": x } or null, "relaxedSource": bool }`.
 
 ### 9.2 Read routes
 
-On the recommendation service, in JSON, without authentication: the service is only reachable from the internal network.
+Unauthenticated, reachable from the internal network only.
 
 | Route | Content |
 | --- | --- |
-| `GET /v1/explain/users/{userId}` | Topics (id, slug, label, chosen or not, weight, share), liked and rejected articles with their strength, and the last 50 events that changed a weight: type, article, topic, δ, weight of the topic after. |
-| `GET /v1/explain/requests/{requestId}` | The `feed_requests` row and its `feed_items`, with the title of each article. |
-| `GET /healthz` | Status of the service, size and age of the catalogue. |
+| `GET /v1/explain/users/{userId}` | Topics (id, slug, label, chosen or not, weight, share), liked and rejected articles with their strength, the last 50 events that changed a weight: type, article, topic, δ, weight of the topic after |
+| `GET /v1/explain/requests/{requestId}` | The saved batch and its cards, with the title of each article |
+| `GET /healthz` | Status, size and age of the catalogue |
 
 ## 10. Parameters
 
@@ -416,7 +384,7 @@ All deterministic (seed and clock imposed). The bounds of A1, A2 and A4 hold for
 
 ### 11.3 Report for the jury
 
-A script plays 4 typical readers over 100 cards each, imitating the backend (pages of 10, the n+10 stock rule decided with the backend; the current backend differs, section 13), and produces a table per reader and per page of 10:
+A script plays 4 typical readers over 100 cards each, imitating the backend (pages of 10, the n+10 stock rule decided with the backend; the current backend differs, see [Decisions](decisions.md#gaps-with-the-backend)), and produces a table per reader and per page of 10:
 
 - share of relevant cards (within the simulated reader's stated tastes);
 - share of the favourite topic;
@@ -424,55 +392,3 @@ A script plays 4 typical readers over 100 cards each, imitating the backend (pag
 - number of distinct topics and sources.
 
 Typical readers: faithful to their chosen topics; passionate about an unchosen topic; allergic to a chosen topic; a reader who skips everything. Each reader follows a fixed rule (likes such subtopic, hides such topic, skips the rest). Output in Markdown and CSV.
-
-## 12. What is left to the coding team
-
-- The organisation of the modules, as long as the core stays in pure functions (8.1).
-- The SQL queries and how the catalogue is loaded.
-- The log format, packaging, containerisation.
-- Unit tests beyond those of section 11.
-
-## 13. State of the backend (Swipread/api, commit 7549cf5; stream, ingestion and schema at commit 48055c3)
-
-What the backend really does on each point the recommender depends on, read in its code. Paths are relative to the Swipread/api repository. The backend is the reference: where it differs from what had been decided, the recommender adapts or the gap is reported.
-
-| Point | What the backend does | For the recommender |
-| --- | --- | --- |
-| Stock kept on a strong event | Strong events: `like`, `save`, `share`, `hide`, and complete `read` (4.4) (`event/StrongEventPolicy.java`). On one of them, `FeedRefiller.invalidate` calls `FeedStore.trim(userId, pageSize)`: it keeps the first 10 articles of the stock, **whatever the position** of the card, then starts a refill. A `hide` also removes the article from the stock. | **Gap with the n+10 rule** decided (section 15, stock rule 4 of the contract), which kept the first `p` articles. With the cards still on the phone (9 − p) and the 10 kept, an interaction on card n shows between card n+11 (last card of the page) and n+20 (first card of the page), not at n+10. The simulation of section 11.3 still imitates the n+10 rule. |
-| Refill after commit | `EventService.ingest` stores the events in a transaction, and only then invalidates the stock. The refill runs in the background, under the lock `feed:{userId}:lock` (5 s); a batch computed while a new invalidation changes `feed:{userId}:ver` is dropped and recomputed once. | Compliant: the replayed profile holds the event, the echo is not lost. |
-| `exclude` | `FeedRefiller.refill` sends the current stock (`LRANGE feed:{userId} 0 -1`), in order, and `count = 50 − size of the stock`. | Compliant: the cards of `exclude` count as placed before the batch (7.2) and remove the echo (4.4). |
-| `seen:{userId}` | Redis set of the articles served, extended at each page (`FeedStore.markSeen`, TTL 30 days). The backend also filters out the articles of the batch already in `seen`. | Compliant: the recommender reads it read-only (7.1). |
-| `fallback:{slug}` | `FallbackFeedProvider` reads the `fallback:{slug}` lists of the reader's topics, shuffled, then completes with the most recent articles of the database. It never writes them. | Compliant: the worker writes them, keyed by slug (8.5). |
-| Rights of the recommender in the database | Migration `V5__reco_role.sql`: group role `swipread_reco`, without login. `SELECT` on `app` (on `app.users`, only `id`, `locale`, `created_at`; nothing on `app.event_outbox` or `app.refresh_tokens`), `USAGE` and `CREATE` on the `reco` schema, read and write on its tables. No `UPDATE` on `app`, no `CREATE` on the database. The login role is created by operations: `CREATE ROLE reco_service LOGIN PASSWORD '…' IN ROLE swipread_reco`. | The recommender writes nothing to `app`: embeddings go to `reco.article_embeddings` (8.4). It does not create the `reco` schema (created by V1), only its tables (9.1). |
-| Recommender client | `reco/HttpRecommendationClient` calls `POST {swipread.reco.base-url}/v1/recommendations` (default `http://localhost:8081`, variable `SWIPREAD_RECO_URL`, 300 ms timeout). The `mock-reco` profile replaces it with `MockRecommendationClient` (random articles); `dev` and `test` include `mock-reco` (`application.yaml`). | The backend only calls the real recommender when started without the `dev` and `test` profiles ([Getting started](getting-started.md#run-next-to-the-api)). Default port of the recommender: 8081. |
-| `events` stream | Published by the backend through an outbox table (`V6__event_outbox.sql`, `OutboxRelay`) after writing to `app.events`: `XADD events MINID ~ (now - 7 d)`, one field `data` with the JSON of the message. In `dev`, `MockEventsConsumer` reads it in the group `mock-reco` and logs each message. `user_deleted` messages ask to erase the reader's profile and batches (contract v1.5). | Consumed by the worker in the group `reco` (8.6): profiles kept up to date in `reco.user_profiles`, data of a deleted account erased at once. |
-| Ingestion | The backend's `ingestion` module (contract v1.5, disabled in `dev` and `test`): every 15 minutes, reads the feeds of the active sources that have topics, writes `app.articles` (`word_count` read from the article's page when it is readable) and `app.article_topics` (the 1 to 3 topics of the source, `confidence` 1.0, 0.9, 0.8 in the order of `app.source_topics`). In `dev`, nothing writes `app.articles` but the development data. `db/dev-data/R__2_sample_articles.sql` (`dev` profile) creates 300 sample articles of a single source ("Sample article n", in French, `published_at` spread over the 300 hours before the migration, one topic each, without embedding). `db/seed/R__1_topics.sql` creates 8 topics. | The worker encodes these 300 articles. A single source: the varied sources rule (7.2) is always relaxed. They leave the catalogue `MAX_AGE_DAYS` after the migration, which does not make them younger. Nearly identical titles give very close embeddings: the demo batches say nothing about the quality of the algorithm. |
-| `app` schema | Migrations V1 to V8 (V8: `app.source_topics`, read state of `app.sources`, drop of `reco.user_profiles` and `reco.model_runs` created by V1). No `status`, `cluster_id`, `content_hash`, `embedding_model` or `embedded_at` on `app.articles`; `app.events.article_id` may be null; event type `unsave`. | Every article of an active source is active; `cluster_id` null (7.2); events without an article ignored and `unsave` read (4.1). The integration tests run on a copy of these migrations (`sql/app_schema.sql`), connected with a role member of `swipread_reco`. |
-
-## 14. With real traffic
-
-What v1 leaves out, and what would trigger adding it:
-
-| Topic | What we would do | When |
-| --- | --- | --- |
-| Learned ranking | Train a model (LightGBM) to predict opening from the terms of the score, on `reco.feed_items` joined with `app.events`, correcting the position bias | A few tens of thousands of cards served |
-| Popularity | Add a "read by many people" term and a `trending` reason | As soon as there are several hundred active readers |
-| Collaborative filtering | Recommend what readers with close tastes liked (`reason = collaborative`) | Same |
-| A/B test | Serve two `modelVersion` to two groups and compare the open rates | As soon as a change of algorithm competes with the existing one |
-| Incremental profile | Apply each message of the `events` stream to the stored profile instead of replaying the history (today the stream triggers a full replay, 8.6) | When a reader's history goes beyond a few thousand events |
-| Approximate search | Use pgvector's HNSW index instead of the exact in-memory computation | Catalogue beyond about 100,000 articles |
-| Grouped interests | Sum up the liked articles in a few centres instead of keeping them all | When the liked lists go beyond a few hundred |
-
-The data needed is already saved by v1: every card served, its position, its detailed score and the version of the algorithm.
-
-## 15. Origin of the decisions
-
-| Decision | Made by |
-| --- | --- |
-| Demo to a jury, visible adaptation, product and technique graded | Enzo |
-| Service in Python, the API reference and the contract are the reference | Enzo |
-| n+10 rule on the stock | Enzo, validated by William |
-| One weight per topic, higher for the chosen topics, non-zero for the others, adjusted by the interactions, which gives the proportion shown | Enzo |
-| Within a topic, output the articles closest to what the reader liked | Enzo |
-| Dropping LightGBM, popularity, A/B tests, centroids, session vector; section "with real traffic" | Proposed by Claude, accepted by Enzo |
-| Everything else: parameter values, additive update with renormalisation, floors, 60 % cap, single value per article, closeness to the 3 nearest, rejection term, freshness, interleaving with random offsets, echo topic, profile replayed from the database, in-memory catalogue, embedding model, explanation tables and routes, tests | Proposed by Claude, validated by Enzo |

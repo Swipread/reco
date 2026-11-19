@@ -1,12 +1,12 @@
 # Decisions
 
-The backend/recommender contract and the [specification](algo_reco.md) are the reference; section 15 of the specification says who made each decision of the algorithm. This page records the architecture decisions of this codebase, the known gaps with the backend and what is still open.
+The backend/recommender contract and the [algorithm](algorithm.md) are the reference. This page records the architecture decisions of this codebase, the known gaps with the backend, what real traffic would change and what is still open. The algorithm's goals and its main choices were set by the recommendation team; the rest was proposed during the design and validated by that team.
 
 ## Architecture decision records
 
 ### ADR-1 · An explicit model, no learning
 
-Swipread is graded in a demo, without real readers: the feed must visibly adapt to one person and every card must be explainable. The model is a weight per topic and a score formula, with no learned component on data that does not exist. Section 14 of the specification says what would come with real traffic.
+Swipread is graded in a demo, without real readers: the feed must visibly adapt to one person and every card must be explainable. The model is a weight per topic and a score formula, with no learned component on data that does not exist. [With real traffic](#with-real-traffic) says what would come with it.
 
 ### ADR-2 · The algorithm in pure functions
 
@@ -52,9 +52,23 @@ CI runs the lint, the unit, API, acceptance and integration tests (on the produc
 
 | Gap | Effect | Status |
 | --- | --- | --- |
-| The API keeps the first 10 cards of the stock on a strong event, whatever the card's position, instead of the decided n+10 rule | An interaction on card n shows between card n+11 and n+20 | Reported (spec section 13); the simulation still imitates n+10 |
+| On a strong event (`event/StrongEventPolicy.java`), `FeedRefiller.invalidate` keeps the first 10 cards of the stock whatever the position of the card, then refills; the n+10 rule decided with the API kept the first `p` | With the cards still on the phone (9 − p) and the 10 kept, an interaction on card n shows between card n+11 and n+20, not at n+10 | Reported; the simulated readers (spec 11.3) still imitate n+10 |
 | The web app does not send `scrollDepth` | A complete read is judged by time only (60 % of the expected reading time) | Accepted (spec 4.4) |
 | No `cluster_id` on `app.articles` | "Same story" rests on similarity alone | Accepted; the comparison stays in the code for the day the ingestion produces one |
+
+## With real traffic
+
+What v1 leaves out, and what would trigger adding it. The data needed is already saved: every card served, its position, its detailed score and the version of the algorithm.
+
+| Topic | What we would do | When |
+| --- | --- | --- |
+| Learned ranking | Train a model (LightGBM) to predict opening from the terms of the score, on `reco.feed_items` joined with `app.events`, correcting the position bias | A few tens of thousands of cards served |
+| Popularity | Add a "read by many people" term and a `trending` reason | As soon as there are several hundred active readers |
+| Collaborative filtering | Recommend what readers with close tastes liked (`reason = collaborative`) | Same |
+| A/B test | Serve two `modelVersion` to two groups and compare the open rates | As soon as a change of algorithm competes with the existing one |
+| Incremental profile | Apply each message of the `events` stream to the stored profile instead of replaying the history (ADR-5) | When a reader's history goes beyond a few thousand events |
+| Approximate search | Use pgvector's HNSW index instead of the exact in-memory computation (ADR-7) | Catalogue beyond about 100,000 articles |
+| Grouped interests | Sum up the liked articles in a few centres instead of keeping them all | When the liked lists go beyond a few hundred |
 
 ## Open questions
 

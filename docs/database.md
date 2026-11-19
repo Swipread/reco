@@ -39,7 +39,7 @@ Read only; the recommender never writes to `app`.
 | `app.events` | `event_id`, `user_id`, `type`, `article_id`, `payload`, `occurred_at`, `received_at` | Replay of the profile and mark of `reco.user_profiles`. Types read: `view`, `open`, `read`, `like`, `unlike`, `save`, `unsave`, `share`, `hide`; rows without `article_id` are ignored |
 | `app.user_articles` | `user_id`, `article_id` | Articles the reader already met, left out of the batches |
 
-The API has neither an article status nor a `cluster_id`: every article of an active source is active, and the "same story" rule rests on similarity alone ([specification](algo_reco.md), 7.2).
+The API has neither an article status nor a `cluster_id`: every article of an active source is active, and the "same story" rule rests on similarity alone ([algorithm](algorithm.md), 7.2).
 
 ## Tables of `reco`
 
@@ -89,7 +89,7 @@ CREATE TABLE IF NOT EXISTS reco.article_embeddings (
 );
 ```
 
-- `feed_requests` and `feed_items`: each batch computed and its cards; content of the `jsonb` columns in the [specification](algo_reco.md), section 9.
+- `feed_requests` and `feed_items`: each batch computed and its cards; content of the `jsonb` columns in the [algorithm](algorithm.md), section 9.
 - `article_embeddings`: one embedding per article, written by the worker. Only the rows of the current model (`multilingual-e5-small`) are read; a row of another model is encoded again and replaced (specification, 8.4).
 - `user_profiles` (contract v1.5, specification 8.6): each reader's profile, kept up to date by the worker from the `events` stream and checked at each request. It is used only if its mark and basis are those of the moment; otherwise it is replayed from `app.events` and replaced.
   - Mark: `events_count`, `last_occurred_at` and `last_event_id` of the reader's events that count for the profile (types of specification 4.1, with an article).

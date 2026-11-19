@@ -53,9 +53,9 @@ The [API](https://github.com/Swipread/api) owns accounts, articles and events; i
 
 ## How it works
 
-**A model you can explain.** Each reader has one weight per topic, starting from the topics they chose. Every interaction gives the article a value (a quick skip is slightly negative, a long view, an open or a read positive, a like or save the most, a hide strongly negative) and moves the weight of its topic by the change. The weights decide how many cards each topic gets in a batch, capped at 60 %, interleaved so that every page of 10 keeps the proportions. → [Algorithm](docs/algo_reco.md)
+**A model you can explain.** Each reader has one weight per topic, starting from the topics they chose. Every interaction gives the article a value (a quick skip is slightly negative, a long view, an open or a read positive, a like or save the most, a hide strongly negative) and moves the weight of its topic by the change. The weights decide how many cards each topic gets in a batch, capped at 60 %, interleaved so that every page of 10 keeps the proportions. → [Algorithm](docs/algorithm.md)
 
-**A score per article.** Within a topic, articles are ranked by closeness to what the reader liked (cosine similarity of embeddings, recentred on the catalogue), freshness (48-hour half-life) and a penalty for resemblance to what they rejected. Liking an article about AI also brings closer an economy article about AI. → [Algorithm](docs/algo_reco.md)
+**A score per article.** Within a topic, articles are ranked by closeness to what the reader liked (cosine similarity of embeddings, recentred on the catalogue), freshness (48-hour half-life) and a penalty for resemblance to what they rejected. Liking an article about AI also brings closer an economy article about AI. → [Algorithm](docs/algorithm.md)
 
 **The echo of a strong signal.** After a like, save, share or complete read, the next batch starts with that topic, unless the stock the API kept already holds a card of it. Without that exception, a series of likes would reduce the feed to one topic.
 
@@ -144,7 +144,7 @@ The algorithm of the specification is implemented with its acceptance tests and 
 | | |
 | --- | --- |
 | **Guides** | [Getting started](docs/getting-started.md) · [Architecture](docs/architecture.md) · [Flows](docs/flows.md) · [Database](docs/database.md) · [Configuration](docs/configuration.md) · [Testing](docs/testing.md) · [Decisions](docs/decisions.md) · [FAQ](docs/faq.md) · [Glossary](docs/glossary.md) |
-| **Reference** | [Algorithm specification](docs/algo_reco.md) |
+| **Reference** | [Algorithm](docs/algorithm.md) |
 
 Start from the [documentation index](docs/README.md).
 

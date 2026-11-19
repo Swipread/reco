@@ -24,6 +24,7 @@
 | **Replay** | Folding the reader's events, oldest first, into the profile |
 | **Request id** (`requestId`) | Id of a batch (`r_…`); its SHA-256 seeds the random offsets |
 | **Same story** | Two articles with a similarity of at least `DUP_SIM` (0.80): never both in a batch |
+| **Spec** | What the code's comments call the [algorithm](algorithm.md) page, whose section numbers ("spec 4.2") are stable |
 | **Share** | Part of the batch given to a topic: its weight, capped at 60 % |
 | **Stored profile** | The row of `reco.user_profiles`: replay, mark and basis |
 | **Strong event** | `like`, `save`, `share`, `hide` or complete `read`: the API trims and refills the stock |

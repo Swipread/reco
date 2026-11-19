@@ -1,6 +1,6 @@
 # Flows
 
-The main sequences between the API and the recommender. The details of each rule are in the [specification](algo_reco.md).
+The main sequences between the API and the recommender. The details of each rule are in the [algorithm](algorithm.md).
 
 ## A batch for a reader
 

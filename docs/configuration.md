@@ -18,7 +18,7 @@ Both processes are configured by environment variables only; there is no configu
 
 ## Parameters of the algorithm
 
-Every field of `Params` (`src/swipread_reco/params.py`, the table of [spec section 10](algo_reco.md#10-parameters)) can be overridden by `RECO_` followed by its name in upper case: `RECO_P_MAX=0.5`, `RECO_DUP_SIM=0.85`, `RECO_EVENTS_MAX=3000`. The value is converted to the field's type; an invalid one stops the process at start with the variable named.
+Every field of `Params` (`src/swipread_reco/params.py`, the table of [spec section 10](algorithm.md#10-parameters)) can be overridden by `RECO_` followed by its name in upper case: `RECO_P_MAX=0.5`, `RECO_DUP_SIM=0.85`, `RECO_EVENTS_MAX=3000`. The value is converted to the field's type; an invalid one stops the process at start with the variable named.
 
 The parameters are saved with every batch (`reco.feed_requests.params`) and are part of the basis of every stored profile: changing one recomputes the profiles at their next request, without a migration. Give the api and the worker the same values.
 
