@@ -27,9 +27,9 @@ Two values depend on the embedding model and are to be checked on real articles:
 ## Production checklist
 
 - The API's migrations up to V8 have run before the recommender starts.
-- A dedicated login role, member of `swipread_reco`, with its own password: `CREATE ROLE reco_service LOGIN PASSWORD '…' IN ROLE swipread_reco`.
+- A dedicated login role, member of `swipread_reco`, with its own password: `CREATE ROLE reco_service LOGIN PASSWORD '…' IN ROLE swipread_reco` (on the Swipread server, the deployment creates it, see [Deployment](deployment.md#production)).
 - `RECO_HOST=0.0.0.0` in a container, and the api reachable from the API only: its routes are not authenticated.
-- `RECO_DB_TIMEOUT_S` lowered under the API's 300 ms timeout (for instance `0.25`).
+- `RECO_DB_TIMEOUT_S` lowered under the API's 300 ms timeout (`0.25` in production).
 - One worker, with a stable `RECO_STREAM_CONSUMER`.
-- The embedding model available offline (`HF_HUB_OFFLINE=1`), so that a restart never depends on Hugging Face: the Docker image bakes it in (see [Getting started](getting-started.md#docker-image)).
-- Memory: the worker holds the model and torch, the api the catalogue (a few MB per thousand articles).
+- The embedding model available offline (`HF_HUB_OFFLINE=1`), so that a restart never depends on Hugging Face: the Docker image bakes it in (see [Deployment](deployment.md#container-image)).
+- Memory: the worker holds the model and torch (about 770 MB), the api the catalogue (a few MB per thousand articles). On a small server, `OMP_NUM_THREADS=1` keeps the worker's encoding on one core.

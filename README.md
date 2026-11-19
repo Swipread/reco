@@ -137,13 +137,13 @@ Both processes read their settings from environment variables: `RECO_DATABASE_UR
 
 ## Project status
 
-The algorithm of the specification is implemented with its acceptance tests and explanation routes, and the interface with the API follows contract v1.5: the recommender consumes the events stream and keeps reader profiles. It runs next to the real API in the end-to-end tests. Not deployed yet: production serves the API's fallback feed until the recommender is packaged (container image, release workflow) and added to the server.
+The algorithm of the specification is implemented with its acceptance tests and explanation routes, and the interface with the API follows contract v1.5: the recommender consumes the events stream and keeps reader profiles. It runs next to the real API in the end-to-end tests. Version 1.0.1 is in production: a version tag on `main` runs the checks, builds the container image (CPU-only torch, embedding model included), deploys it next to the API and creates the GitHub release. → [Deployment](docs/deployment.md)
 
 ## Documentation
 
 | | |
 | --- | --- |
-| **Guides** | [Getting started](docs/getting-started.md) · [Architecture](docs/architecture.md) · [Flows](docs/flows.md) · [Database](docs/database.md) · [Configuration](docs/configuration.md) · [Testing](docs/testing.md) · [FAQ](docs/faq.md) · [Glossary](docs/glossary.md) |
+| **Guides** | [Getting started](docs/getting-started.md) · [Architecture](docs/architecture.md) · [Flows](docs/flows.md) · [Database](docs/database.md) · [Configuration](docs/configuration.md) · [Deployment](docs/deployment.md) · [Testing](docs/testing.md) · [FAQ](docs/faq.md) · [Glossary](docs/glossary.md) |
 | **Reference** | [Algorithm](docs/algorithm.md) |
 
 Start from the [documentation index](docs/README.md).

@@ -11,6 +11,7 @@ Developer documentation for the recommendation service. New here? Read [Getting 
 | [Flows](flows.md) | Follow the main sequences (a batch, a strong signal, a new article, a deleted account) |
 | [Database](database.md) | See what the recommender reads in `app`, its own tables in `reco` and its rights |
 | [Configuration](configuration.md) | Environment variables, parameters of the algorithm, production checklist |
+| [Deployment](deployment.md) | The container image, production, releasing, the release checklist |
 | [Testing](testing.md) | Unit, integration, performance and end-to-end tests, continuous integration, the report |
 | [FAQ](faq.md) | Fix common problems and understand a batch |
 | [Glossary](glossary.md) | Look up a term |
