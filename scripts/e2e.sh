@@ -110,11 +110,15 @@ REDIS_PORT="$(compose port redis 6379 | sed 's/.*://')"
 wait_until 60 "PostgreSQL" compose exec -T postgres pg_isready -U swipread -d swipread -h 127.0.0.1
 wait_until 30 "Redis" compose exec -T redis redis-cli ping
 
+# The jar has a fixed reproducible-build date: compare the sources with a stamp written after the build.
 JAR="$(ls "$API_DIR"/target/api-*.jar 2>/dev/null | head -1 || true)"
-if [[ -z "$JAR" || -n "$(find "$API_DIR/src/main" "$API_DIR/pom.xml" -newer "$JAR" -print -quit)" ]]; then
+STAMP="$API_DIR/target/.swipread-e2e-build"
+if [[ -z "$JAR" || ! -f "$STAMP" \
+      || -n "$(find "$API_DIR/src/main" "$API_DIR/pom.xml" -newer "$STAMP" -print -quit)" ]]; then
   log "building the backend (first run downloads its dependencies)"
   (cd "$API_DIR" && ./mvnw -q -DskipTests package) >"$RUN_DIR/backend-build.log" 2>&1 \
     || die "backend build failed, see $RUN_DIR/backend-build.log"
+  touch "$STAMP"
   JAR="$(ls "$API_DIR"/target/api-*.jar | head -1)"
 fi
 
