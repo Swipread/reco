@@ -2,7 +2,7 @@ from swipread_reco.__main__ import bind_address
 
 
 def test_bind_address_defaults_to_loopback():
-    assert bind_address({}) == ("127.0.0.1", 8000)
+    assert bind_address({}) == ("127.0.0.1", 8081)
 
 
 def test_bind_address_reads_host_and_port():

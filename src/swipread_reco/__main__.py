@@ -2,7 +2,7 @@
 
 Both read RECO_DATABASE_URL, RECO_REDIS_URL, RECO_DB_TIMEOUT_S (default 2) and the RECO_*
 overrides of Params; the api also reads RECO_HOST (default 127.0.0.1) and RECO_PORT
-(default 8000).
+(default 8081, the backend's default swipread.reco.base-url).
 """
 
 import argparse
@@ -24,7 +24,7 @@ from swipread_reco.worker.encode import E5Encoder
 # The routes are unauthenticated and reachable from the internal network only (spec 9.2):
 # listen on loopback unless RECO_HOST says otherwise (e.g. 0.0.0.0 inside a container).
 DEFAULT_HOST = "127.0.0.1"
-DEFAULT_PORT = 8000
+DEFAULT_PORT = 8081  # the backend calls http://localhost:8081 by default (application.yaml)
 # The worker is not on a request path: give Redis longer than the api's 100 ms.
 WORKER_REDIS_TIMEOUT_S = 5.0
 
@@ -70,7 +70,7 @@ def run_worker_process() -> None:
         socket_timeout=WORKER_REDIS_TIMEOUT_S, socket_connect_timeout=WORKER_REDIS_TIMEOUT_S,
     )
     try:
-        store.ensure_schema()  # purge needs reco.feed_requests even if the api never started
+        store.ensure_schema()  # encode and purge need the reco tables even if the api never ran
         run_worker(store, client, E5Encoder(), params, utcnow, time.sleep)
     finally:
         client.close()
