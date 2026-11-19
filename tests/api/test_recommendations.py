@@ -1,5 +1,6 @@
 """POST /v1/recommendations and GET /healthz over the in-memory store (spec 7.1, 8.2, 8.3)."""
 
+import dataclasses
 import re
 import time
 from datetime import timedelta
@@ -10,6 +11,8 @@ from fastapi.testclient import TestClient
 
 from swipread_reco.api import RedisSeen, create_app
 from swipread_reco.params import Params
+from swipread_reco.profiles import current_profile
+from swipread_reco.recommend import RecoInput, recommend
 from swipread_reco.store import PgStore
 
 from ..fakes import NOW
@@ -158,3 +161,45 @@ def test_redis_seen_reads_the_users_set():
     r.sadd("seen:u_2", "a_3")
     assert RedisSeen(r).seen("u_1") == frozenset({"a_1", "a_2"})
     assert RedisSeen(r).seen("u_nope") == frozenset()
+
+
+def test_the_profile_is_stored_then_reused(client, store):
+    store.add_event("u_1", "like", store.sim.ids(4)[0], received_at=NOW - timedelta(hours=1))
+    post(client)
+    assert store.profile_saves == 1 and store.profiles["u_1"][1].count == 1
+    post(client)
+    assert store.profile_saves == 1
+
+
+def test_a_strong_event_before_its_stream_message_is_in_the_next_lot(client, store):
+    post(client)                                       # profile stored, no event yet
+    hidden = store.sim.ids(1)[0]
+    store.add_event("u_1", "hide", hidden, received_at=NOW + timedelta(seconds=1))
+    rid = post(client).json()["requestId"]             # the worker has not seen it
+    assert hidden in store.lots[rid]["lot"].profile.touched_article_ids
+    assert store.profiles["u_1"][1].count == 1
+
+
+def test_a_lot_from_the_stored_profile_is_the_lot_of_a_replay(store, cache):
+    for k, article in enumerate(store.sim.ids(2)[:20]):
+        store.add_event("u_1", ("like", "hide", "open", "save")[k % 4], article,
+                        received_at=NOW - timedelta(hours=30 - k))
+    store.add_event("u_1", "like", store.sim.ids(5)[0], received_at=NOW - timedelta(minutes=1))
+    topics = [t.id for t in store.topics()]
+    chosen = store.chosen_topics("u_1")
+    last = NOW - timedelta(minutes=5)
+    replayed = RecoInput(
+        request_id="r_1", language="fr", count=50, excluded=frozenset(),
+        events=store.events("u_1", 5000), all_topics=topics, chosen=chosen,
+        last_request_at=last, now=NOW,
+    )
+    current_profile(store, "u_1", topics, chosen, Params(), NOW - timedelta(hours=2))
+    stored = dataclasses.replace(
+        replayed, events=store.events_received_after("u_1", last, 5000),
+        state=current_profile(store, "u_1", topics, chosen, Params(), NOW),
+    )
+    catalog = cache.get()
+    one = recommend(replayed, catalog, store.embeddings, Params(), seed=7)
+    two = recommend(stored, catalog, store.embeddings, Params(), seed=7)
+    assert one.items == two.items and one.profile == two.profile
+    assert one.profile.echo_topic == 5

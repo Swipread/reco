@@ -13,7 +13,17 @@ from psycopg.rows import dict_row
 from psycopg.types.json import Jsonb
 from psycopg_pool import ConnectionPool
 
-from swipread_reco.models import CatalogRow, Event, Lot, Topic
+from swipread_reco.models import (
+    CatalogRow,
+    Event,
+    EventMark,
+    Lot,
+    ProfileItem,
+    ProfileState,
+    StoredProfile,
+    Topic,
+    WeightChange,
+)
 from swipread_reco.params import EMBEDDING_MODEL, MODEL_VERSION, Params
 
 # Longest wait for a pooled connection (infrastructure setting, not a spec 10 parameter).
@@ -70,6 +80,18 @@ CREATE TABLE IF NOT EXISTS reco.feed_items (
   PRIMARY KEY (request_id, position)
 );
 
+-- The reader's replayed profile (contract v1.5), kept up to date from the `events` stream and
+-- checked against app.events at each request. state and basis: see docs/database.md.
+CREATE TABLE IF NOT EXISTS reco.user_profiles (
+  user_id          text PRIMARY KEY,
+  basis            jsonb NOT NULL,
+  state            jsonb NOT NULL,
+  events_count     int  NOT NULL,
+  last_occurred_at timestamptz,
+  last_event_id    text,
+  computed_at      timestamptz NOT NULL
+);
+
 -- Embeddings live here: the role cannot write to app (no FK either, no REFERENCES right on app).
 CREATE TABLE IF NOT EXISTS reco.article_embeddings (
   article_id  text PRIMARY KEY,
@@ -90,6 +112,14 @@ class Store(Protocol):
     def user_locale(self, user_id: str) -> str | None: ...
     def chosen_topics(self, user_id: str) -> frozenset[int]: ...
     def events(self, user_id: str, limit: int) -> list[Event]: ...
+    def events_received_after(
+        self, user_id: str, after: datetime | None, limit: int
+    ) -> list[Event]: ...
+    def event_mark(self, user_id: str) -> EventMark: ...
+    def profile_inputs(self, user_id: str, limit: int) -> tuple[EventMark, list[Event]]: ...
+    def stored_profile(self, user_id: str) -> StoredProfile | None: ...
+    def save_profile(self, user_id: str, profile: StoredProfile, computed_at: datetime) -> None: ...
+    def delete_user_data(self, user_id: str) -> None: ...
     def user_article_ids(self, user_id: str) -> frozenset[str]: ...
     def embeddings(self, ids: Sequence[str]) -> dict[str, np.ndarray]: ...
     def last_request_at(self, user_id: str) -> datetime | None: ...
@@ -124,6 +154,105 @@ def lot_profile_json(lot: Lot, slug: Mapping[int, str]) -> dict[str, Any]:
     }
 
 
+def _items_json(items: Sequence[ProfileItem]) -> list[list[Any]]:
+    return [[i.article_id, i.strength, i.last_event_at.isoformat()] for i in items]
+
+
+def _items_from_json(rows: Sequence[Sequence[Any]]) -> list[ProfileItem]:
+    return [ProfileItem(a, float(s), datetime.fromisoformat(t)) for a, s, t in rows]
+
+
+def state_json(state: ProfileState) -> dict[str, Any]:
+    """The `state` column of reco.user_profiles. Lists, not objects, wherever order matters:
+    jsonb does not keep the order of object keys."""
+    return {
+        "weights": [[t, w] for t, w in state.weights.items()],
+        "liked": _items_json(state.liked),
+        "rejected": _items_json(state.rejected),
+        "touched": sorted(state.touched_article_ids),
+        "history": [
+            [c.event_id, c.type, c.article_id, c.topic_id, c.delta, c.weight_after,
+             c.occurred_at.isoformat()]
+            for c in state.history
+        ],
+    }
+
+
+def state_from_json(doc: Mapping[str, Any]) -> ProfileState:
+    return ProfileState(
+        weights={int(t): float(w) for t, w in doc["weights"]},
+        liked=_items_from_json(doc["liked"]),
+        rejected=_items_from_json(doc["rejected"]),
+        touched_article_ids=frozenset(doc["touched"]),
+        history=[
+            WeightChange(
+                event_id=e, type=ty, article_id=a, topic_id=int(t), delta=float(d),
+                weight_after=float(w), occurred_at=datetime.fromisoformat(at),
+            )
+            for e, ty, a, t, d, w, at in doc["history"]
+        ],
+    )
+
+
+# Profile events of a reader: the same filter for the events and for the mark.
+_PROFILE_EVENTS_WHERE = "user_id = %(user)s AND type = ANY(%(types)s) AND article_id IS NOT NULL"
+
+
+def _event_mark(conn: Connection, user_id: str) -> EventMark:
+    count, occurred_at, event_id = conn.execute(
+        f"""
+        SELECT n.count, l.occurred_at, l.event_id
+        FROM (SELECT count(*) FROM app.events WHERE {_PROFILE_EVENTS_WHERE}) n
+        LEFT JOIN LATERAL (
+          SELECT occurred_at, event_id FROM app.events WHERE {_PROFILE_EVENTS_WHERE}
+          ORDER BY occurred_at DESC, event_id DESC LIMIT 1
+        ) l ON true
+        """,
+        {"user": user_id, "types": PROFILE_EVENT_TYPES},
+    ).fetchone()
+    return EventMark(count=count, last_occurred_at=occurred_at, last_event_id=event_id)
+
+
+def _events(
+    conn: Connection, user_id: str, limit: int, received_after: datetime | None = None
+) -> list[Event]:
+    """The reader's `limit` most recent profile events (only those received after
+    `received_after` if given), oldest first."""
+    after = "" if received_after is None else "AND received_at > %(after)s"
+    rows = conn.execute(
+        f"""
+        WITH recent AS (
+          SELECT event_id, type, article_id, occurred_at, received_at, payload
+          FROM app.events
+          WHERE {_PROFILE_EVENTS_WHERE} {after}
+          ORDER BY occurred_at DESC, event_id DESC
+          LIMIT %(limit)s
+        )
+        SELECT r.event_id, r.type, r.article_id, r.occurred_at, r.received_at,
+               r.payload, p.topic_id, a.word_count
+        FROM recent r
+        LEFT JOIN app.articles a ON a.id = r.article_id
+        LEFT JOIN LATERAL (
+          SELECT topic_id FROM app.article_topics t
+          WHERE t.article_id = r.article_id
+          ORDER BY confidence DESC, topic_id
+          LIMIT 1
+        ) p ON true
+        ORDER BY r.occurred_at, r.event_id
+        """,
+        {"user": user_id, "types": PROFILE_EVENT_TYPES, "limit": limit, "after": received_after},
+    ).fetchall()
+    return [
+        Event(
+            event_id=event_id, type=type_, article_id=article_id,
+            occurred_at=occurred_at, received_at=received_at, payload=payload,
+            topic_id=topic_id, word_count=word_count,
+        )
+        for event_id, type_, article_id, occurred_at, received_at, payload, topic_id,
+        word_count in rows
+    ]
+
+
 def _configure(conn: Connection) -> None:
     register_vector(conn)
     conn.commit()  # register_vector reads the catalog; leave the connection idle
@@ -155,7 +284,8 @@ class PgStore:
         self._pool.close()
 
     def ensure_schema(self) -> None:
-        """Create the reco tables if missing; SchemaError if schema `reco` or type `vector` is.
+        """Create the reco tables if missing; SchemaError if schema `reco` or type `vector` is,
+        or if reco.user_profiles is still the table of the backend's migration V1 (dropped by V8).
 
         Runs on its own connection: the pooled ones need the `vector` type to start.
         """
@@ -172,6 +302,16 @@ class PgStore:
                 raise SchemaError(
                     "type vector is missing: the pgvector extension is created by the backend's"
                     " migration V1 (Swipread/api), run the backend migrations first"
+                )
+            legacy = conn.execute(
+                "SELECT to_regclass('reco.user_profiles') IS NOT NULL AND NOT EXISTS ("
+                " SELECT 1 FROM information_schema.columns WHERE table_schema = 'reco'"
+                " AND table_name = 'user_profiles' AND column_name = 'state')"
+            ).fetchone()[0]
+            if legacy:
+                raise SchemaError(
+                    "reco.user_profiles is the backend's old table: its migration V8"
+                    " (Swipread/api) drops it, run the backend migrations first"
                 )
             conn.execute(RECO_SCHEMA)
 
@@ -195,38 +335,62 @@ class PgStore:
     def events(self, user_id: str, limit: int) -> list[Event]:
         """The reader's `limit` most recent profile events, oldest first."""
         with self._pool.connection() as conn:
-            rows = conn.execute(
-                """
-                WITH recent AS (
-                  SELECT event_id, type, article_id, occurred_at, received_at, payload
-                  FROM app.events
-                  WHERE user_id = %s AND type = ANY(%s) AND article_id IS NOT NULL
-                  ORDER BY occurred_at DESC, event_id DESC
-                  LIMIT %s
-                )
-                SELECT r.event_id, r.type, r.article_id, r.occurred_at, r.received_at,
-                       r.payload, p.topic_id, a.word_count
-                FROM recent r
-                LEFT JOIN app.articles a ON a.id = r.article_id
-                LEFT JOIN LATERAL (
-                  SELECT topic_id FROM app.article_topics t
-                  WHERE t.article_id = r.article_id
-                  ORDER BY confidence DESC, topic_id
-                  LIMIT 1
-                ) p ON true
-                ORDER BY r.occurred_at, r.event_id
-                """,
-                (user_id, PROFILE_EVENT_TYPES, limit),
-            ).fetchall()
-        return [
-            Event(
-                event_id=event_id, type=type_, article_id=article_id,
-                occurred_at=occurred_at, received_at=received_at, payload=payload,
-                topic_id=topic_id, word_count=word_count,
+            return _events(conn, user_id, limit)
+
+    def events_received_after(
+        self, user_id: str, after: datetime | None, limit: int
+    ) -> list[Event]:
+        """Like events(), restricted to the events received after `after` (all if None)."""
+        with self._pool.connection() as conn:
+            return _events(conn, user_id, limit, after)
+
+    def event_mark(self, user_id: str) -> EventMark:
+        with self._pool.connection() as conn:
+            return _event_mark(conn, user_id)
+
+    def profile_inputs(self, user_id: str, limit: int) -> tuple[EventMark, list[Event]]:
+        """The mark and the `limit` most recent events, read in one snapshot: the mark never
+        covers an event that the events miss."""
+        with self._pool.connection() as conn, conn.transaction():
+            conn.execute("SET TRANSACTION ISOLATION LEVEL REPEATABLE READ")
+            return _event_mark(conn, user_id), _events(conn, user_id, limit)
+
+    def stored_profile(self, user_id: str) -> StoredProfile | None:
+        with self._pool.connection() as conn:
+            row = conn.execute(
+                "SELECT basis, state, events_count, last_occurred_at, last_event_id"
+                " FROM reco.user_profiles WHERE user_id = %s",
+                (user_id,),
+            ).fetchone()
+        if row is None:
+            return None
+        basis, state, count, occurred_at, event_id = row
+        return StoredProfile(
+            basis=basis, mark=EventMark(count, occurred_at, event_id), state=state_from_json(state)
+        )
+
+    def save_profile(self, user_id: str, profile: StoredProfile, computed_at: datetime) -> None:
+        """Insert or replace the reader's row of reco.user_profiles."""
+        mark = profile.mark
+        with self._pool.connection() as conn:
+            conn.execute(
+                "INSERT INTO reco.user_profiles (user_id, basis, state, events_count,"
+                " last_occurred_at, last_event_id, computed_at) VALUES (%s, %s, %s, %s, %s, %s, %s)"
+                " ON CONFLICT (user_id) DO UPDATE SET basis = EXCLUDED.basis,"
+                " state = EXCLUDED.state, events_count = EXCLUDED.events_count,"
+                " last_occurred_at = EXCLUDED.last_occurred_at,"
+                " last_event_id = EXCLUDED.last_event_id, computed_at = EXCLUDED.computed_at",
+                (
+                    user_id, Jsonb(profile.basis), Jsonb(state_json(profile.state)), mark.count,
+                    mark.last_occurred_at, mark.last_event_id, computed_at,
+                ),
             )
-            for event_id, type_, article_id, occurred_at, received_at, payload, topic_id,
-            word_count in rows
-        ]
+
+    def delete_user_data(self, user_id: str) -> None:
+        """Delete everything the reco keeps on the reader: profile and lots (contract v1.5)."""
+        with self._pool.connection() as conn, conn.transaction():
+            conn.execute("DELETE FROM reco.user_profiles WHERE user_id = %s", (user_id,))
+            conn.execute("DELETE FROM reco.feed_requests WHERE user_id = %s", (user_id,))
 
     def user_article_ids(self, user_id: str) -> frozenset[str]:
         with self._pool.connection() as conn:
@@ -387,13 +551,18 @@ class PgStore:
 
     def purge(self, now: datetime, retention_days: int) -> int:
         """Delete requests older than `retention_days` or of users gone from app.users (8.7),
-        and embeddings of articles gone from app.articles; the number of requests deleted."""
+        profiles of users gone and embeddings of articles gone from app.articles; the number of
+        requests deleted."""
         with self._pool.connection() as conn, conn.transaction():
             cur = conn.execute(
                 "DELETE FROM reco.feed_requests r"
                 " WHERE r.generated_at < %s - make_interval(days => %s)"
                 " OR NOT EXISTS (SELECT 1 FROM app.users u WHERE u.id = r.user_id)",
                 (now, retention_days),
+            )
+            conn.execute(
+                "DELETE FROM reco.user_profiles p"
+                " WHERE NOT EXISTS (SELECT 1 FROM app.users u WHERE u.id = p.user_id)"
             )
             conn.execute(
                 "DELETE FROM reco.article_embeddings e"

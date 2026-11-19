@@ -18,6 +18,7 @@ from pydantic.alias_generators import to_camel
 from swipread_reco.catalog_cache import CatalogCache
 from swipread_reco.explain import explain_router
 from swipread_reco.params import MODEL_VERSION, SCORE_DECIMALS, Params
+from swipread_reco.profiles import current_profile
 from swipread_reco.recommend import RecoInput, recommend
 from swipread_reco.store import Store
 
@@ -146,18 +147,23 @@ def create_app(
             return RecommendationResponse(
                 request_id=request_id, model_version=MODEL_VERSION, generated_at=now, items=[]
             )
+        all_topics = [t.id for t in db.topics()]
+        chosen = db.chosen_topics(req.user_id)
+        last_request_at = db.last_request_at(req.user_id)
         inp = RecoInput(
             request_id=request_id,
             language=(req.context.locale or user_locale)[:2].lower(),
             count=req.count,
             excluded=frozenset(req.exclude) | seen_ids(req.user_id)
             | db.user_article_ids(req.user_id),
-            events=db.events(req.user_id, params.events_max),
-            all_topics=[t.id for t in db.topics()],
-            chosen=db.chosen_topics(req.user_id),
-            last_request_at=db.last_request_at(req.user_id),
+            # Only the echo (4.4) reads them: the events received since the previous lot.
+            events=db.events_received_after(req.user_id, last_request_at, params.events_max),
+            all_topics=all_topics,
+            chosen=chosen,
+            last_request_at=last_request_at,
             now=now,
             stock=tuple(req.exclude),
+            state=current_profile(db, req.user_id, all_topics, chosen, params, now),
         )
         lot = recommend(inp, catalog, db.embeddings, params)
         db.save_lot(

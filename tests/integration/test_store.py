@@ -67,7 +67,9 @@ def test_ensure_schema_creates_the_reco_tables_as_the_restricted_role(store, con
         "SELECT tablename FROM pg_tables WHERE schemaname = 'reco' AND tableowner = 'reco_test'"
         " ORDER BY 1"
     ).fetchall()
-    assert [t for (t,) in owned] == ["article_embeddings", "feed_items", "feed_requests"]
+    assert [t for (t,) in owned] == [
+        "article_embeddings", "feed_items", "feed_requests", "user_profiles"
+    ]
 
 
 def test_ensure_schema_fails_clearly_without_schema_reco(reco_dsn, conn):

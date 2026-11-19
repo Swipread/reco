@@ -10,9 +10,9 @@ import numpy as np
 
 from swipread_reco.allocation import TopicSequence, cap_shares, seed_from_request_id, topic_offsets
 from swipread_reco.assemble import build_lot, candidate_mask
-from swipread_reco.models import Catalog, Event, Lot, ProfileItem
+from swipread_reco.models import Catalog, Event, Lot, ProfileItem, ProfileState
 from swipread_reco.params import Params
-from swipread_reco.profile import build_profile
+from swipread_reco.profile import echo_candidate, finish_profile, replay_profile
 from swipread_reco.scoring import score_candidates
 
 FetchEmbeddings = Callable[[Sequence[str]], Mapping[str, np.ndarray]]
@@ -24,12 +24,13 @@ class RecoInput:
     language: str                    # two letters, lower case
     count: int
     excluded: frozenset[str]         # exclude ∪ seen:{userId} ∪ app.user_articles
-    events: Sequence[Event]
+    events: Sequence[Event]          # all of them, or only those received after last_request_at with `state`
     all_topics: Sequence[int]
     chosen: frozenset[int]
     last_request_at: datetime | None
     now: datetime
     stock: tuple[str, ...] = ()      # the request's `exclude` only, in order: the stock the backend kept
+    state: ProfileState | None = None  # replay already done (reco.user_profiles); None: replay `events`
 
 
 def _with_embeddings(
@@ -78,9 +79,10 @@ def recommend(
     if seed is None:
         seed = seed_from_request_id(inp.request_id)
 
-    profile = build_profile(
-        inp.events, inp.all_topics, inp.chosen, inp.now, inp.last_request_at, params
-    )
+    state = inp.state
+    if state is None:
+        state = replay_profile(inp.events, inp.all_topics, inp.chosen, params)
+    profile = finish_profile(state, echo_candidate(inp.events, inp.last_request_at), inp.now, params)
     wanted = [item.article_id for item in profile.liked + profile.rejected]
     found = fetch_embeddings(wanted) if wanted else {}
     dim = catalog.embeddings.shape[1]

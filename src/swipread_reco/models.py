@@ -61,6 +61,44 @@ class Profile:
 
 
 @dataclass(frozen=True)
+class ProfileState:
+    """What the replay of the events gives (spec 4.2 and 4.3), before the clock and the previous
+    request come in: the part of the profile that `reco.user_profiles` keeps.
+
+    `liked` and `rejected` hold the strengths before the age factor, most recent first, at most
+    PROFILE_MAX_ITEMS each. `history` keeps the last weight changes only (profile.PROFILE_HISTORY_MAX).
+    """
+
+    weights: dict[int, float]            # topic_id -> weight, sums to 1
+    liked: list[ProfileItem]
+    rejected: list[ProfileItem]
+    touched_article_ids: frozenset[str]
+    history: list[WeightChange]
+
+
+@dataclass(frozen=True)
+class EventMark:
+    """Where a profile stands in the reader's events of app.events (profile types, with article).
+
+    `last_occurred_at` and `last_event_id` are the contract's mark: the most recent event taken
+    into account. `count` also catches an event committed late with an older occurred_at.
+    """
+
+    count: int
+    last_occurred_at: datetime | None
+    last_event_id: str | None
+
+
+@dataclass(frozen=True)
+class StoredProfile:
+    """A row of reco.user_profiles: the replayed state, what it was computed from and on."""
+
+    basis: dict[str, Any]                # model version, parameters, topics, chosen topics
+    mark: EventMark
+    state: ProfileState
+
+
+@dataclass(frozen=True)
 class Catalog:
     ids: list[str]
     index: dict[str, int]                # id -> row

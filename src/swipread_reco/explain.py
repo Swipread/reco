@@ -1,8 +1,9 @@
 """Read-only explanation routes: GET /v1/explain/users/{userId} and /v1/explain/requests/{requestId}
 (spec 9.2).
 
-The user profile is replayed exactly as POST /v1/recommendations does it: same events, same
-last_request_at, same clock, and the liked and rejected articles the algorithm can use.
+The user profile is the one POST /v1/recommendations would use: the same stored or replayed
+state (profiles.current_profile), the same last_request_at and clock, and the liked and rejected
+articles the algorithm can use.
 """
 
 from collections.abc import Callable
@@ -17,11 +18,13 @@ from pydantic.alias_generators import to_camel
 from swipread_reco.allocation import cap_shares
 from swipread_reco.models import ProfileItem
 from swipread_reco.params import SCORE_DECIMALS, Params
-from swipread_reco.profile import build_profile
+from swipread_reco.profile import PROFILE_HISTORY_MAX, echo_candidate, finish_profile
+from swipread_reco.profiles import current_profile
 from swipread_reco.store import Store
 
-# Definition fixed by spec 9.2 (not a tunable of section 10): weight changes shown.
-HISTORY_MAX = 50
+# Definition fixed by spec 9.2 (not a tunable of section 10): weight changes shown, all those
+# the stored profile keeps.
+HISTORY_MAX = PROFILE_HISTORY_MAX
 
 
 class _Out(BaseModel):
@@ -93,9 +96,16 @@ def explain_router(store: Store, params: Params, clock: Callable[[], datetime]) 
             raise HTTPException(status_code=404, detail="unknown user")
         topics = store.topics()
         chosen = store.chosen_topics(user_id)
-        profile = build_profile(
-            store.events(user_id, params.events_max), [t.id for t in topics], chosen,
-            clock(), store.last_request_at(user_id), params,
+        all_topics = [t.id for t in topics]
+        now = clock()
+        last_request_at = store.last_request_at(user_id)
+        profile = finish_profile(
+            current_profile(store, user_id, all_topics, chosen, params, now),
+            echo_candidate(
+                store.events_received_after(user_id, last_request_at, params.events_max),
+                last_request_at,
+            ),
+            now, params,
         )
         shares = cap_shares(profile.weights, params.p_max)
 

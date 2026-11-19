@@ -8,7 +8,7 @@ from dataclasses import dataclass
 from datetime import datetime, timedelta
 from typing import Any
 
-from swipread_reco.models import Event, Profile, ProfileItem, WeightChange
+from swipread_reco.models import Event, Profile, ProfileItem, ProfileState, WeightChange
 from swipread_reco.params import Params
 
 # Definitions fixed by spec 4.1 (not tunables of section 10): expected reading time
@@ -182,20 +182,13 @@ def _is_strong_positive(event: Event) -> bool:
     return event.type == "read" and _is_complete_read(event)
 
 
-def build_profile(
-    events: Sequence[Event],
-    all_topics: Sequence[int],
-    chosen: AbstractSet[int],
-    now: datetime,
-    last_request_at: datetime | None,
-    params: Params,
-) -> Profile:
-    """Replay the reader's events into a profile (spec 4.2 to 4.4).
+# Weight changes kept with the profile: the ones the explanation route shows (spec 9.2).
+PROFILE_HISTORY_MAX = 50
 
-    Events are replayed oldest first, ordered by (occurred_at, event_id); an event_id
-    seen twice is applied once, an event without article is ignored. `last_request_at`
-    None makes every event eligible to the echo. Truncation to EVENTS_MAX is the caller's job.
-    """
+
+def _replay_order(events: Sequence[Event]) -> list[Event]:
+    """Events oldest first by (occurred_at, event_id), each event_id once, those without article
+    left out."""
     replay: list[Event] = []
     seen: set[str] = set()
     for event in sorted(events, key=lambda e: (e.occurred_at, e.event_id)):
@@ -204,23 +197,32 @@ def build_profile(
         if event.event_id not in seen:
             seen.add(event.event_id)
             replay.append(event)
+    return replay
 
+
+def replay_profile(
+    events: Sequence[Event],
+    all_topics: Sequence[int],
+    chosen: AbstractSet[int],
+    params: Params,
+) -> ProfileState:
+    """Replay the reader's events into topic weights and liked and rejected articles (4.2, 4.3).
+
+    Depends on the events, the topics and the parameters only: neither on the clock nor on the
+    previous request. Truncation to EVENTS_MAX is the caller's job.
+    """
     start = initial_weights(all_topics, chosen, params)
     weights = dict(start)
     states: dict[str, ArticleState] = {}
     last_event_at: dict[str, datetime] = {}   # insertion order = order of last event
     history: list[WeightChange] = []
-    echo_event: Event | None = None
 
-    for event in replay:
+    for event in _replay_order(events):
         before = states.get(event.article_id, ArticleState())
         after = apply_event(before, event, params)
         states[event.article_id] = after
         last_event_at.pop(event.article_id, None)
         last_event_at[event.article_id] = event.occurred_at
-
-        if (last_request_at is None or event.received_at > last_request_at) and _is_strong_positive(event):
-            echo_event = event
 
         delta = article_value(after, params) - article_value(before, params)
         topic = event.topic_id
@@ -245,25 +247,77 @@ def build_profile(
         if value == 0:
             continue
         last = last_event_at[article_id]
-        age_days = max((now - last) / timedelta(days=1), 0.0)
-        decay = 0.5 ** (age_days / params.half_life_profile_days)
         if value > 0:
             if len(liked) < params.profile_max_items:
-                strength = min(1.0, value / params.v_like)
-                liked.append(ProfileItem(article_id, strength * decay, last))
+                liked.append(ProfileItem(article_id, min(1.0, value / params.v_like), last))
         elif len(rejected) < params.profile_max_items:
-            strength = 1.0 if state.hidden else params.s_skip
-            rejected.append(ProfileItem(article_id, strength * decay, last))
+            rejected.append(ProfileItem(article_id, 1.0 if state.hidden else params.s_skip, last))
 
-    echo_topic = None
-    if echo_event is not None and weights.get(echo_event.topic_id, 0.0) > 0:
-        echo_topic = echo_event.topic_id
-
-    return Profile(
+    return ProfileState(
         weights=weights,
         liked=liked,
         rejected=rejected,
-        echo_topic=echo_topic,
         touched_article_ids=frozenset(states),
-        history=history,
+        history=history[-PROFILE_HISTORY_MAX:],
+    )
+
+
+def echo_candidate(events: Sequence[Event], last_request_at: datetime | None) -> int | None:
+    """Main topic of the most recent strong positive event received after the previous request
+    (spec 4.4), before the weight and stock conditions; None if there is none.
+
+    `last_request_at` None makes every event eligible. Only the events received after the
+    previous request matter: the caller may pass just those.
+    """
+    echo_event: Event | None = None
+    for event in _replay_order(events):
+        if (last_request_at is None or event.received_at > last_request_at) and _is_strong_positive(event):
+            echo_event = event
+    return echo_event.topic_id if echo_event is not None else None
+
+
+def finish_profile(
+    state: ProfileState, echo_topic: int | None, now: datetime, params: Params,
+) -> Profile:
+    """The profile at `now`: age factor on the liked and rejected strengths (4.3), echo topic
+    kept only if its weight is positive (4.4)."""
+
+    def aged(items: list[ProfileItem]) -> list[ProfileItem]:
+        out = []
+        for item in items:
+            age_days = max((now - item.last_event_at) / timedelta(days=1), 0.0)
+            decay = 0.5 ** (age_days / params.half_life_profile_days)
+            out.append(ProfileItem(item.article_id, item.strength * decay, item.last_event_at))
+        return out
+
+    if echo_topic is not None and state.weights.get(echo_topic, 0.0) <= 0:
+        echo_topic = None
+    return Profile(
+        weights=dict(state.weights),
+        liked=aged(state.liked),
+        rejected=aged(state.rejected),
+        echo_topic=echo_topic,
+        touched_article_ids=state.touched_article_ids,
+        history=list(state.history),
+    )
+
+
+def build_profile(
+    events: Sequence[Event],
+    all_topics: Sequence[int],
+    chosen: AbstractSet[int],
+    now: datetime,
+    last_request_at: datetime | None,
+    params: Params,
+) -> Profile:
+    """Replay the reader's events into a profile (spec 4.2 to 4.4).
+
+    Events are replayed oldest first, ordered by (occurred_at, event_id); an event_id
+    seen twice is applied once, an event without article is ignored. `last_request_at`
+    None makes every event eligible to the echo. Truncation to EVENTS_MAX is the caller's job.
+    `history` keeps the last PROFILE_HISTORY_MAX weight changes.
+    """
+    return finish_profile(
+        replay_profile(events, all_topics, chosen, params),
+        echo_candidate(events, last_request_at), now, params,
     )

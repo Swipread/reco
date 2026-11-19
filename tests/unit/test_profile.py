@@ -5,7 +5,14 @@ import pytest
 
 from swipread_reco.models import Event
 from swipread_reco.params import Params
-from swipread_reco.profile import build_profile, initial_weights
+from swipread_reco.profile import (
+    PROFILE_HISTORY_MAX,
+    build_profile,
+    echo_candidate,
+    finish_profile,
+    initial_weights,
+    replay_profile,
+)
 
 TOPICS = list(range(1, 11))
 CHOSEN = {1, 2, 3}
@@ -186,3 +193,46 @@ def test_events_without_article_are_ignored():
     only = build_profile([events[2]], TOPICS, CHOSEN, NOW, NOW - timedelta(minutes=10), Params())
     assert p == only
     assert p.echo_topic is None and p.touched_article_ids == {"a"}
+
+
+def _mixed_events():
+    events = [ev("like", f"l{k}", 1 + k % 4, 600 - k) for k in range(80)]
+    events += [ev("hide", f"h{k}", 5, 300 - k) for k in range(5)]
+    events += [ev("view", "s", 6, 20, {"dwellMs": 300}), ev("open", "o", 2, 10)]
+    events += [ev("save", "l3", 4, 5, received_minutes_ago=1)]
+    return events
+
+
+def test_replay_then_finish_is_build_profile():
+    events, last = _mixed_events(), NOW - timedelta(minutes=3)
+    state = replay_profile(events, TOPICS, CHOSEN, Params())
+    later = NOW + timedelta(days=12)
+    assert finish_profile(state, echo_candidate(events, last), later, Params()) == build_profile(
+        events, TOPICS, CHOSEN, later, last, Params()
+    )
+
+
+def test_replay_does_not_depend_on_the_clock_nor_the_previous_request():
+    state = replay_profile(_mixed_events(), TOPICS, CHOSEN, Params())
+    assert state.liked[0].strength == 1.0     # before the age factor
+    old = finish_profile(state, None, NOW + timedelta(days=30), Params())
+    assert old.liked[0].strength == pytest.approx(0.5, rel=1e-3)
+
+
+def test_echo_candidate_reads_only_events_received_after_the_previous_request():
+    events = _mixed_events()
+    assert echo_candidate(events, NOW - timedelta(minutes=3)) == 4
+    assert echo_candidate(events, NOW) is None
+    assert echo_candidate(events[-1:], NOW - timedelta(minutes=3)) == 4   # just those suffice
+
+
+def test_finish_profile_drops_an_echo_topic_without_weight():
+    state = replay_profile([], TOPICS, CHOSEN, Params())
+    assert finish_profile(state, 99, NOW, Params()).echo_topic is None
+
+
+def test_state_keeps_the_last_weight_changes_only():
+    events = [ev("like", f"a{k}", 1 + k % 3, 1000 - k) for k in range(PROFILE_HISTORY_MAX + 20)]
+    full = replay_profile(events, TOPICS, CHOSEN, Params())
+    assert len(full.history) == PROFILE_HISTORY_MAX
+    assert full.history[-1].article_id == f"a{PROFILE_HISTORY_MAX + 19}"

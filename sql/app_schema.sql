@@ -1,5 +1,5 @@
 -- Mirror, for the reco's integration tests, of what the backend's Flyway migrations create
--- (Swipread/api at commit 7549cf5, src/main/resources/db/migration):
+-- (Swipread/api at commit 48055c3, src/main/resources/db/migration):
 --   V1__init_schema.sql                 extension, schemas app and reco, tables, indexes
 --   V2__events_default_partition.sql    app.events_default
 --   V3__user_role.sql                   app.users.role
@@ -8,6 +8,8 @@
 --   V5__reco_role.sql                   group role swipread_reco and its privileges
 --   V6__event_outbox.sql                app.event_outbox, out of the reco's reach
 --   V7__refresh_tokens.sql              app.refresh_tokens, out of the reco's reach
+--   V8__ingestion_and_reco_tables.sql   app.source_topics, read state of app.sources, drop of
+--                                       reco.user_profiles and reco.model_runs (contract v1.5)
 -- Statements are copied as they are, in migration order; keep in sync with new migrations.
 -- The backend's tables are the reference: never add here what its migrations do not create.
 -- The reco's own tables are created by the service itself (PgStore.ensure_schema).
@@ -183,3 +185,28 @@ CREATE INDEX refresh_tokens_family_idx ON app.refresh_tokens (family_id);
 CREATE INDEX refresh_tokens_expires_idx ON app.refresh_tokens (expires_at);
 
 REVOKE ALL ON app.refresh_tokens FROM swipread_reco;
+
+-- V8
+-- Contrat v1.5 : ingestion des sources et tables de la reco.
+
+-- Thèmes de chaque source, hérités par ses articles. position = ordre choisi par l'admin :
+-- l'article reçoit confidence 1.0, 0.9, 0.8 dans cet ordre, le premier est donc son thème principal.
+CREATE TABLE app.source_topics (
+  source_id int      NOT NULL REFERENCES app.sources(id) ON DELETE CASCADE,
+  topic_id  int      NOT NULL REFERENCES app.topics(id),
+  position  smallint NOT NULL CHECK (position BETWEEN 1 AND 3),
+  PRIMARY KEY (source_id, topic_id),
+  UNIQUE (source_id, position)
+);
+
+-- Lecture conditionnelle du flux et état de la dernière lecture
+ALTER TABLE app.sources
+  ADD COLUMN etag            text,
+  ADD COLUMN last_modified   text,
+  ADD COLUMN last_fetched_at timestamptz,
+  ADD COLUMN last_error      text;
+
+-- Le schéma reco appartient à la reco, qui crée ses tables : celles de V1, jamais utilisées et d'un
+-- format qui n'est pas celui de son profil, sont supprimées.
+DROP TABLE reco.user_profiles;
+DROP TABLE reco.model_runs;

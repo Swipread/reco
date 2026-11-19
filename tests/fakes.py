@@ -6,10 +6,10 @@ from typing import Any
 
 import numpy as np
 
-from swipread_reco.models import CatalogRow, Event, Lot, Topic
+from swipread_reco.models import CatalogRow, Event, EventMark, Lot, StoredProfile, Topic
 from swipread_reco.params import MODEL_VERSION, Params
 from swipread_reco.sim.catalog import SimCatalog, make_sim_catalog
-from swipread_reco.store import lot_profile_json
+from swipread_reco.store import lot_profile_json, state_from_json, state_json
 
 from .unit.helpers import rows_of
 
@@ -39,6 +39,9 @@ class FakeStore:
         self.user_articles: dict[str, set[str]] = {}
         self.lots: dict[str, dict[str, Any]] = {}     # request_id -> save_lot arguments
         self.events_limit: int | None = None          # `limit` of the last events() call
+        # reco.user_profiles: user_id -> (basis, mark, state as JSON, computed_at)
+        self.profiles: dict[str, tuple[dict[str, Any], EventMark, dict[str, Any], datetime]] = {}
+        self.profile_saves = 0                        # save_profile() calls
         self._dropped: set[str] = set()
         self._deleted: set[str] = set()
         # worker
@@ -111,6 +114,47 @@ class FakeStore:
         with_article = [e for e in self.user_events.get(user_id, []) if e.article_id is not None]
         ordered = sorted(with_article, key=lambda e: e.occurred_at)
         return ordered[-limit:] if limit > 0 else []
+
+    def events_received_after(
+        self, user_id: str, after: datetime | None, limit: int
+    ) -> list[Event]:
+        self._check()
+        events = self.events(user_id, limit if after is None else 10**9)
+        if after is None:
+            return events
+        recent = [e for e in events if e.received_at > after]
+        return recent[-limit:] if limit > 0 else []
+
+    def event_mark(self, user_id: str) -> EventMark:
+        self._check()
+        with_article = [e for e in self.user_events.get(user_id, []) if e.article_id is not None]
+        if not with_article:
+            return EventMark(0, None, None)
+        last = max(with_article, key=lambda e: (e.occurred_at, e.event_id))
+        return EventMark(len(with_article), last.occurred_at, last.event_id)
+
+    def profile_inputs(self, user_id: str, limit: int) -> tuple[EventMark, list[Event]]:
+        return self.event_mark(user_id), self.events(user_id, limit)
+
+    def stored_profile(self, user_id: str) -> StoredProfile | None:
+        """Read back through the JSON of the `state` column, as PgStore does."""
+        self._check()
+        row = self.profiles.get(user_id)
+        if row is None:
+            return None
+        basis, mark, state, _ = row
+        return StoredProfile(basis=basis, mark=mark, state=state_from_json(state))
+
+    def save_profile(self, user_id: str, profile: StoredProfile, computed_at: datetime) -> None:
+        self._check()
+        self.profile_saves += 1
+        self.profiles[user_id] = (profile.basis, profile.mark, state_json(profile.state), computed_at)
+
+    def delete_user_data(self, user_id: str) -> None:
+        self._check()
+        self.profiles.pop(user_id, None)
+        for request_id in [r for r, saved in self.lots.items() if saved["user_id"] == user_id]:
+            del self.lots[request_id]
 
     def user_article_ids(self, user_id: str) -> frozenset[str]:
         self._check()
@@ -213,6 +257,8 @@ class FakeStore:
         ]
         for request_id in gone:
             del self.lots[request_id]
+        for user_id in [u for u in self.profiles if u not in self.locales]:
+            del self.profiles[user_id]
         for article_id in [i for i in self.written if not self._in_app(i)]:
             del self.written[article_id]
             del self.written_models[article_id]
