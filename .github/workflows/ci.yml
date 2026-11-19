@@ -4,7 +4,7 @@ on:
   push:
     branches: [main]
   pull_request:
-  # Reusable by a future release workflow before an image is built.
+  # Called by release.yml before an image is built.
   workflow_call:
 
 permissions:

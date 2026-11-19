@@ -11,7 +11,7 @@ Lint: `uv run ruff check` (line length 100).
 
 ## Continuous integration
 
-`.github/workflows/ci.yml` runs on every push to `main` and every pull request: `uv sync --locked`, the lint, then every test but perf and e2e, the integration ones against a `pgvector/pgvector:0.8.7-pg17` service (the production image). `scripts/check_integration_ran.py` reads the JUnit report and fails the run if the integration tests were skipped, as they are silently without `RECO_TEST_DSN`. The check "Lint and test (Python 3.12)" is required to merge into `main`.
+`.github/workflows/ci.yml` runs on every push to `main` and every pull request: `uv sync --locked`, the lint, then every test but perf and e2e, the integration ones against a `pgvector/pgvector:0.8.7-pg17` service (the production image). `scripts/check_integration_ran.py` reads the JUnit report and fails the run if the integration tests were skipped, as they are silently without `RECO_TEST_DSN`. The check "Lint and test (Python 3.12)" is required to merge into `main`. The release workflow (`release.yml`, on a version tag) runs the same workflow before it builds an image.
 
 The performance test is left out because its timing depends on the machine; the end-to-end tests because they need the API and the model.
 
