@@ -1,6 +1,6 @@
 # swipread-reco
 
-Service de recommandation d'articles de Swipread : il compose, pour chaque lecteur, un lot d'articles à partir des thèmes choisis à l'inscription et de ses interactions, avec le détail du score de chaque carte. Un processus `worker` à côté encode les nouveaux articles, tient les listes de repli et purge les vieilles traces.
+Service de recommandation d'articles de Swipread : il compose, pour chaque lecteur, un lot d'articles à partir des thèmes choisis à l'inscription et de ses interactions, avec le détail du score de chaque carte. Un processus `worker` à côté encode les nouveaux articles, tient les listes de repli, lit le flux `events` du backend pour tenir à jour le profil de chaque lecteur (et effacer celui d'un compte supprimé), et purge les vieilles traces.
 
 Spécification : [`docs/algo_reco.md`](docs/algo_reco.md). Contrat avec le backend : [`docs/Contrat backend reco.md`](docs/Contrat%20backend%20reco.md).
 
@@ -49,12 +49,13 @@ PYTHONPATH=src uv run python -m swipread_reco api
 | `RECO_REDIS_URL` | obligatoire | URL Redis (api et worker) |
 | `RECO_HOST` | `127.0.0.1` | adresse d'écoute de l'api ; mettre `0.0.0.0` dans un conteneur |
 | `RECO_PORT` | `8081` | port de l'api ; celui qu'appelle le backend par défaut (`SWIPREAD_RECO_URL=http://localhost:8081`) |
+| `RECO_STREAM_CONSUMER` | `worker` | nom du worker dans le groupe `reco` du flux `events` ; stable d'un redémarrage à l'autre, pour reprendre les messages lus mais pas acquittés. Un seul worker à la fois |
 | `RECO_DB_TIMEOUT_S` | `2` | attente maximale d'une connexion PostgreSQL, en secondes. Au-dessus de la coupure à 300 ms du backend : à baisser en production |
 | `RECO_<PARAM>` | valeurs de la section 10 | surcharge d'un paramètre de `Params` : nom du champ en majuscules, par ex. `RECO_P_MAX=0.5`, `RECO_DUP_SIM=0.85` |
 
 ## Base de données et rôle restreint
 
-La reco ne crée ni le schéma `reco` ni l'extension `vector` : ils viennent des migrations du backend. Elle se connecte avec un rôle membre du rôle de groupe `swipread_reco` (migration V5 du backend) : lecture seule sur `app`, création de tables et lecture-écriture sur `reco`. Au démarrage, l'api et le worker créent les trois tables de la reco (`feed_requests`, `feed_items`, `article_embeddings`) si elles manquent. Détail : [`docs/database.md`](docs/database.md).
+La reco ne crée ni le schéma `reco` ni l'extension `vector` : ils viennent des migrations du backend. Elle se connecte avec un rôle membre du rôle de groupe `swipread_reco` (migration V5 du backend) : lecture seule sur `app`, création de tables et lecture-écriture sur `reco`. Au démarrage, l'api et le worker créent les quatre tables de la reco (`feed_requests`, `feed_items`, `article_embeddings`, `user_profiles`) si elles manquent. La base doit avoir reçu la migration V8 du backend, qui supprime son ancienne table `reco.user_profiles`. Détail : [`docs/database.md`](docs/database.md).
 
 ## Lancer à côté du backend
 
@@ -102,7 +103,7 @@ Le client HTTP du backend (celui du JDK) propose à chaque nouvelle connexion de
 
 ## Tests de bout en bout
 
-`scripts/e2e.sh` fait tourner le vrai backend avec la reco et vérifie, par l'API publique du backend comme le front web, les scénarios E1 à E9 de `tests/e2e/` (inscription, choix des thèmes, pages du fil, likes, masquages, panne de la reco, latence).
+`scripts/e2e.sh` fait tourner le vrai backend avec la reco et vérifie, par l'API publique du backend comme le front web, les scénarios E1 à E11 de `tests/e2e/` (inscription, choix des thèmes, pages du fil, likes, masquages, panne de la reco, latence, profil tenu à jour par le flux `events`, compte supprimé).
 
 Prérequis : JDK 25, Docker démarré, uv, une copie du dépôt Swipread/api, le modèle `intfloat/multilingual-e5-small` dans le cache Hugging Face (le worker tourne avec `HF_HUB_OFFLINE=1` ; mettre `HF_HUB_OFFLINE=0` pour le télécharger au premier lancement).
 

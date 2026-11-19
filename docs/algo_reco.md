@@ -49,13 +49,13 @@ flowchart LR
 
 À chaque appel `POST /v1/recommendations`, le service :
 
-1. reconstruit le profil du lecteur en rejouant ses événements depuis `app.events` (section 4) ;
+1. prend le profil du lecteur enregistré dans `reco.user_profiles` s'il est à jour, ou le reconstruit en rejouant ses événements depuis `app.events` (section 4, 8.6) ;
 2. note chaque article candidat (section 5) ;
 3. répartit les places du lot entre les thèmes selon les poids (section 6) ;
 4. remplit chaque place avec le meilleur article du thème (section 7) ;
 5. enregistre le lot et son explication, puis répond.
 
-Le profil n'est pas stocké : c'est une fonction pure de l'historique. Conséquences voulues : pas de course entre l'arrivée d'un événement et le recalcul, rejouer deux fois donne le même résultat, et changer un paramètre recalcule tous les profils sans migration.
+Le profil reste une fonction pure de l'historique : celui qu'enregistre `reco.user_profiles` (contrat v1.5) n'en est qu'une copie, utilisée seulement si elle a été calculée sur les mêmes événements, les mêmes thèmes et les mêmes paramètres (8.6). Conséquences voulues : pas de course entre l'arrivée d'un événement et le recalcul, rejouer deux fois donne le même résultat, et changer un paramètre recalcule tous les profils sans migration.
 
 ## 3. Vocabulaire et données d'entrée
 
@@ -272,7 +272,7 @@ On s'arrête quand le lot contient `count` articles ou que tous les thèmes sont
 Python 3.12, FastAPI, psycopg 3, redis-py, numpy, sentence-transformers. Deux processus issus du même paquet :
 
 - **api** : sert `POST /v1/recommendations` et les routes d'explication ; garde le catalogue en mémoire ;
-- **worker** : encode les nouveaux articles, écrit les listes de repli, purge.
+- **worker** : encode les nouveaux articles, écrit les listes de repli, purge, et tient à jour les profils à partir du flux `events` (8.6).
 
 Le calcul (profil, score, répartition, assemblage) est écrit en fonctions pures, sans accès à la base, à Redis ni à l'horloge : ces dépendances sont passées en argument. C'est ce qui rend les tests de la section 11 possibles sans infrastructure.
 
@@ -311,19 +311,32 @@ La reco n'écrit rien dans `app` : le rôle `swipread_reco` du backend n'y a que
 
 Toutes les 10 minutes, pour chaque thème : les 50 articles de sources actives les plus récents (`published_at` décroissant) dont c'est le thème principal, publiés dans les `MAX_AGE_DAYS` derniers jours, écrits dans la liste Redis `fallback:{slug}` avec un TTL de 1 heure. Le remplacement est atomique (écriture dans une clé temporaire puis `RENAME`).
 
-### 8.6 Flux `events`
+### 8.6 Flux `events` et profils enregistrés
 
-La v1 ne consomme pas le flux Redis `events`. Le profil est rejoué depuis `app.events`, que le backend écrit avant de publier : lire la base suffit et évite qu'un lot soit calculé avant l'arrivée du message. Le flux reste disponible pour une mise à jour incrémentale (section 14).
+Contrat v1.5. Le worker lit le flux Redis `events` dans le groupe de consommateurs `reco`, sous un nom stable (`RECO_STREAM_CONSUMER`, `worker` par défaut), par lots de 100, en attendant au plus 2 secondes entre deux activités. Le groupe est créé au début du flux s'il n'existe pas : le premier lancement traite les messages encore gardés (7 jours).
+
+- **Événement d'un lecteur** (types lus par le profil, 4.1) : son profil est recalculé une fois par lot depuis `app.events`, et non depuis le message, puis enregistré dans `reco.user_profiles` avec son repère. Rejouer depuis la source de vérité rend le traitement idempotent et insensible à l'ordre d'arrivée : un message reçu deux fois ou en retard donne le même profil. `impression` et les types inconnus sont acquittés sans travail, un message illisible est journalisé et acquitté.
+- **`user_deleted`** : le profil et les lots du lecteur (`reco.feed_requests`, et `reco.feed_items` par cascade) sont supprimés tout de suite. Un lecteur absent de `app.users` n'a pas non plus de profil enregistré.
+- **Acquittement** : un profil dont le recalcul échoue est acquitté quand même, la demande suivante le recalculera. Une suppression qui échoue reste en attente et est reprise toutes les minutes (`XREADGROUP` depuis `0`), comme les messages lus avant un arrêt brutal ; la purge horaire (8.7) efface les mêmes données en filet de sécurité.
+
+Ce qui est enregistré (`reco.user_profiles`, [database.md](database.md)) : le résultat du rejeu (4.2, 4.3), c'est-à-dire les poids, les articles aimés et rejetés avec leur force avant le facteur d'ancienneté, les articles touchés et les 50 derniers changements de poids. Le facteur d'ancienneté (4.3) et le thème en écho (4.4) dépendent de l'heure et de la requête précédente : ils sont calculés à chaque demande, l'écho sur les seuls événements reçus depuis la requête précédente.
+
+**À chaque demande** (`POST /v1/recommendations`, `GET /v1/explain/users/{userId}`), le profil enregistré n'est utilisé que si :
+
+- son repère est celui des événements du lecteur dans `app.events` (types du profil, avec article) : nombre d'événements, et dernier événement (`occurred_at`, `event_id`) comme le demande le contrat. Le nombre attrape aussi un événement validé en retard avec un `occurred_at` plus ancien que le repère ;
+- sa base est la même : version du modèle, paramètres (section 10), liste des thèmes et thèmes choisis. Un changement de thèmes (`PUT /v1/me/topics`) ne publie pas de message : il est vu ici.
+
+Sinon le profil est rejoué depuis `app.events` (repère et événements lus dans un même instantané) et enregistré. C'est ce qui couvre le cas que la v1 craignait : le backend demande un lot juste après un événement fort, souvent avant que le worker ait lu son message ; la demande voit le repère dépassé et rejoue. Les messages perdus (flux tronqué à 7 jours, Redis vidé) sont couverts de la même façon.
 
 ### 8.7 Purge (worker)
 
-Toutes les heures : suppression des lignes de `reco.feed_requests` de plus de 30 jours, et de celles dont le `user_id` n'existe plus dans `app.users`. Les `feed_items` suivent par cascade. Les lignes de `reco.article_embeddings` dont l'article n'existe plus dans `app.articles` sont supprimées au même passage. La reco ne stocke aucune autre donnée personnelle.
+Toutes les heures : suppression des lignes de `reco.feed_requests` de plus de 30 jours, et de celles dont le `user_id` n'existe plus dans `app.users`. Les `feed_items` suivent par cascade. Les profils (`reco.user_profiles`) des lecteurs absents de `app.users` sont supprimés au même passage, en filet de sécurité derrière `user_deleted` (8.6). Les lignes de `reco.article_embeddings` dont l'article n'existe plus dans `app.articles` sont supprimées au même passage. La reco ne stocke aucune autre donnée personnelle.
 
 ## 9. Explication et traçabilité
 
 ### 9.1 Tables
 
-Le service crée au démarrage ses trois tables, `reco.feed_requests`, `reco.feed_items` et `reco.article_embeddings` (8.4), si elles n'existent pas. Le schéma `reco` et l'extension `vector` viennent des migrations du backend : le rôle de la reco ne peut pas créer de schéma, et le service s'arrête avec un message explicite s'ils manquent. Leur définition est dans [database.md](database.md). Contenu des colonnes `jsonb` :
+Le service crée au démarrage ses quatre tables, `reco.feed_requests`, `reco.feed_items`, `reco.article_embeddings` (8.4) et `reco.user_profiles` (8.6), si elles n'existent pas. Le schéma `reco` et l'extension `vector` viennent des migrations du backend : le rôle de la reco ne peut pas créer de schéma, et le service s'arrête avec un message explicite s'ils manquent, ou si `reco.user_profiles` est encore l'ancienne table du backend (créée par sa migration V1, supprimée par V8). Leur définition est dans [database.md](database.md). Contenu des colonnes `jsonb` :
 
 - `profile` : `{ "weights": {slug: poids}, "shares": {slug: part après plafond}, "likedCount": n, "rejectedCount": n, "echoTopic": slug ou null, "mu": valeur }`.
 - `params` : les paramètres de la section 10 tels qu'utilisés pour ce lot.
@@ -417,7 +430,7 @@ Lecteurs types : fidèle à ses thèmes choisis ; passionné d'un thème non cho
 - Le format des journaux, l'empaquetage, la conteneurisation.
 - Les tests unitaires au-delà de ceux de la section 11.
 
-## 13. État du backend (Swipread/api, commit 7549cf5)
+## 13. État du backend (Swipread/api, commit 7549cf5 ; flux, ingestion et schéma au commit 48055c3)
 
 Ce que le backend fait réellement sur chaque point dont la reco dépend, lu dans son code. Les chemins sont relatifs au dépôt Swipread/api. Le backend fait référence : là où il s'écarte de ce qui avait été décidé, la reco s'adapte ou l'écart est signalé.
 
@@ -430,9 +443,9 @@ Ce que le backend fait réellement sur chaque point dont la reco dépend, lu dan
 | `fallback:{slug}` | `FallbackFeedProvider` lit les listes `fallback:{slug}` des thèmes du lecteur, mélangées, puis complète par les articles les plus récents de la base. Il ne les écrit jamais. | Conforme : le worker les écrit, indexées par slug (8.5). |
 | Droits de la reco en base | Migration `V5__reco_role.sql` : rôle de groupe `swipread_reco`, sans connexion. `SELECT` sur `app` (sur `app.users`, seulement `id`, `locale`, `created_at` ; rien sur `app.event_outbox` ni `app.refresh_tokens`), `USAGE` et `CREATE` sur le schéma `reco`, lecture et écriture sur ses tables. Aucun `UPDATE` sur `app`, pas de `CREATE` sur la base. Le rôle de connexion est créé par l'exploitation : `CREATE ROLE reco_service LOGIN PASSWORD '…' IN ROLE swipread_reco`. | La reco n'écrit rien dans `app` : embeddings dans `reco.article_embeddings` (8.4). Elle ne crée pas le schéma `reco` (créé par V1) mais seulement ses tables (9.1). |
 | Client de reco | `reco/HttpRecommendationClient` appelle `POST {swipread.reco.base-url}/v1/recommendations` (défaut `http://localhost:8081`, variable `SWIPREAD_RECO_URL`, coupure à 300 ms). Le profil `mock-reco` le remplace par `MockRecommendationClient` (articles tirés au hasard) ; `dev` et `test` incluent `mock-reco` (`application.yaml`). | Le backend n'appelle la vraie reco que démarré sans les profils `dev` et `test` (README, « Lancer à côté du backend »). Port par défaut de la reco : 8081. |
-| Flux `events` | Publié par le backend via une table outbox (`V6__event_outbox.sql`, `OutboxRelay`). En `dev`, `MockEventsConsumer` le lit dans le groupe `mock-reco` et journalise chaque message. Les messages `user_deleted` demandent d'effacer `reco.user_profiles`. | Non consommé par la reco (8.6). Elle n'utilise pas `reco.user_profiles` ; les lots d'un compte supprimé partent à la purge suivante (8.7). |
-| Ingestion | Absente du backend : rien n'écrit `app.articles` hors données de développement. `db/dev-data/R__2_sample_articles.sql` (profil `dev`) crée 300 articles d'exemple d'une seule source (« Sample article n », en français, `published_at` étalé sur les 300 heures précédant la migration, un thème chacun, sans embedding). `db/seed/R__1_topics.sql` crée 8 thèmes. | Le worker encode ces 300 articles. Une seule source : la règle des sources variées (7.2) est toujours relâchée. Ils sortent du catalogue `MAX_AGE_DAYS` après la migration, qui ne les rajeunit pas. Des titres presque identiques donnent des embeddings très proches : les lots de démonstration ne disent rien de la qualité de l'algo. |
-| Schéma `app` | Migrations V1 à V7. Pas de `status`, `cluster_id`, `content_hash`, `embedding_model` ni `embedded_at` sur `app.articles` ; `app.events.article_id` peut être nul ; type d'événement `unsave`. | Tout article d'une source active est actif ; `cluster_id` nul (7.2) ; événements sans article ignorés et `unsave` lu (4.1). Les tests d'intégration tournent sur une copie de ces migrations (`sql/app_schema.sql`), connectés avec un rôle membre de `swipread_reco`. |
+| Flux `events` | Publié par le backend via une table outbox (`V6__event_outbox.sql`, `OutboxRelay`) après l'écriture dans `app.events` : `XADD events MINID ~ (maintenant - 7 j)`, un champ `data` avec le JSON du message. En `dev`, `MockEventsConsumer` le lit dans le groupe `mock-reco` et journalise chaque message. Les messages `user_deleted` demandent d'effacer le profil et les lots du lecteur (contrat v1.5). | Consommé par le worker dans le groupe `reco` (8.6) : profils tenus à jour dans `reco.user_profiles`, données d'un compte supprimé effacées tout de suite. |
+| Ingestion | Module `ingestion` du backend (contrat v1.5, désactivé en `dev` et `test`) : toutes les 15 minutes, lit les flux des sources actives qui ont des thèmes, écrit `app.articles` (`word_count` lu sur la page de l'article quand elle est lisible) et `app.article_topics` (les 1 à 3 thèmes de la source, `confidence` 1,0, 0,9, 0,8 dans l'ordre de `app.source_topics`). En `dev`, rien n'écrit `app.articles` hors données de développement. `db/dev-data/R__2_sample_articles.sql` (profil `dev`) crée 300 articles d'exemple d'une seule source (« Sample article n », en français, `published_at` étalé sur les 300 heures précédant la migration, un thème chacun, sans embedding). `db/seed/R__1_topics.sql` crée 8 thèmes. | Le worker encode ces 300 articles. Une seule source : la règle des sources variées (7.2) est toujours relâchée. Ils sortent du catalogue `MAX_AGE_DAYS` après la migration, qui ne les rajeunit pas. Des titres presque identiques donnent des embeddings très proches : les lots de démonstration ne disent rien de la qualité de l'algo. |
+| Schéma `app` | Migrations V1 à V8 (V8 : `app.source_topics`, état de lecture de `app.sources`, suppression de `reco.user_profiles` et `reco.model_runs` créées par V1). Pas de `status`, `cluster_id`, `content_hash`, `embedding_model` ni `embedded_at` sur `app.articles` ; `app.events.article_id` peut être nul ; type d'événement `unsave`. | Tout article d'une source active est actif ; `cluster_id` nul (7.2) ; événements sans article ignorés et `unsave` lu (4.1). Les tests d'intégration tournent sur une copie de ces migrations (`sql/app_schema.sql`), connectés avec un rôle membre de `swipread_reco`. |
 
 ## 14. Et avec du trafic réel
 
@@ -444,7 +457,7 @@ Ce que la v1 écarte, et ce qui déclencherait son ajout :
 | Popularité | Ajouter un terme « lu par beaucoup de monde » et une source `trending` | Dès qu'il y a plusieurs centaines de lecteurs actifs |
 | Filtrage collaboratif | Recommander ce qu'ont aimé des lecteurs aux goûts proches (`reason = collaborative`) | Idem |
 | A/B test | Servir deux `modelVersion` à deux groupes et comparer les taux d'ouverture | Dès qu'un changement d'algo est en concurrence avec l'existant |
-| Profil incrémental | Mettre à jour le profil à chaque message du flux `events` au lieu de rejouer l'historique | Quand l'historique d'un lecteur dépasse quelques milliers d'événements |
+| Profil incrémental | Appliquer chaque message du flux `events` au profil enregistré au lieu de rejouer l'historique (aujourd'hui le flux déclenche un rejeu complet, 8.6) | Quand l'historique d'un lecteur dépasse quelques milliers d'événements |
 | Recherche approchée | Utiliser l'index HNSW de pgvector au lieu du calcul exact en mémoire | Catalogue au-delà d'environ 100 000 articles |
 | Intérêts regroupés | Résumer les articles aimés en quelques centres plutôt que de les garder tous | Quand les listes d'aimés dépassent quelques centaines |
 
