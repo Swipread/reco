@@ -1,141 +1,153 @@
-# swipread-reco
+# Swipread · Recommender
 
-Service de recommandation d'articles de Swipread : il compose, pour chaque lecteur, un lot d'articles à partir des thèmes choisis à l'inscription et de ses interactions, avec le détail du score de chaque carte. Un processus `worker` à côté encode les nouveaux articles, tient les listes de repli, lit le flux `events` du backend pour tenir à jour le profil de chaque lecteur (et effacer celui d'un compte supprimé), et purge les vieilles traces.
+**The recommendation service of Swipread, a feed of recommended articles you scroll one card at a time.** For each reader it composes a batch of articles from the topics they chose at sign-up and from everything they did since, and it can explain every card it served, figures included.
 
-Spécification : [`docs/algo_reco.md`](docs/algo_reco.md). Le contrat avec le backend est un document interne aux équipes, partagé hors de git (`notes/`, ignoré) ; l'API du backend est décrite dans [`docs/api.md` de Swipread/api](https://github.com/Swipread/api/blob/main/docs/api.md).
+Python 3.12 · FastAPI · PostgreSQL 17 + pgvector · Redis 7.4 · numpy · sentence-transformers (multilingual-e5-small) · uv.
 
-## Prérequis
+[![CI](https://github.com/Swipread/reco/actions/workflows/ci.yml/badge.svg)](https://github.com/Swipread/reco/actions/workflows/ci.yml)
+![Python 3.12](https://img.shields.io/badge/Python-3.12-3776ab)
+![FastAPI](https://img.shields.io/badge/FastAPI-0.115%2B-009688)
+![PostgreSQL 17](https://img.shields.io/badge/PostgreSQL-17%20%2B%20pgvector-336791)
+![Redis 7.4](https://img.shields.io/badge/Redis-7.4-dc382d)
+![License](https://img.shields.io/badge/license-all%20rights%20reserved-lightgrey)
 
-- Python 3.12
-- [uv](https://docs.astral.sh/uv/) (`uv sync` installe les dépendances)
-- Docker, pour la base de test : `docker compose up -d` lance PostgreSQL 17 + pgvector (port 5433) et Redis 7.4 (port 6380), les mêmes images que le backend
+## Contents
 
-## Tests
+- [How Swipread fits together](#how-swipread-fits-together)
+- [Features](#features)
+- [How it works](#how-it-works)
+- [Getting started](#getting-started)
+- [Routes](#routes)
+- [Project structure](#project-structure)
+- [Testing](#testing)
+- [Configuration](#configuration)
+- [Project status](#project-status)
+- [Documentation](#documentation)
+- [License](#license)
 
-```sh
-uv run pytest -m "not perf"     # tests unitaires, d'acceptation et de l'API, sans infrastructure
-uv run ruff check
+## How Swipread fits together
 
-# intégration (PostgreSQL réel) : la base pointée est vidée, n'utiliser qu'une base jetable
-RECO_TEST_DSN=postgresql://postgres:postgres@localhost:5433/postgres uv run pytest tests/integration -q
-
-# performance (A13), lancé à part
-uv run pytest -m perf
+```mermaid
+flowchart LR
+    Web["<b>Web app</b><br/>Swipread/web"] -- "REST + JWT" --> API["<b>Swipread API</b><br/>Swipread/api"]
+    API -- "POST /v1/recommendations<br/>300 ms timeout" --> RecoAPI["<b>Recommender api</b><br/>this repository"]
+    API -- "events stream" --> Redis[(Redis<br/>events, seen, fallback lists)]
+    Redis -- "group reco" --> Worker["<b>Recommender worker</b><br/>this repository"]
+    RecoAPI --> PG[(PostgreSQL + pgvector<br/>app: read only · reco: own tables)]
+    Worker --> PG
+    Worker -- "fallback:{slug}" --> Redis
 ```
 
-Sans `RECO_TEST_DSN`, les tests d'intégration sont ignorés. Ils recréent le schéma du backend depuis `sql/app_schema.sql` (copie des migrations de Swipread/api) avec la connexion superutilisateur de `RECO_TEST_DSN`, puis font tourner le `PgStore` sous un rôle `reco_test` membre de `swipread_reco` : ils vérifient ainsi que les droits donnés à la reco par le backend suffisent.
+The [API](https://github.com/Swipread/api) owns accounts, articles and events; it serves each reader's feed from a stock in Redis and asks this service to refill it. The recommender answers with article ids only, never content, and it never writes to the API's tables: it reads them through a dedicated read-only role and keeps its own data in the `reco` schema. The [web app](https://github.com/Swipread/web) never talks to it. The interface between the API and the recommender is fixed by a contract agreed between the two teams.
 
-## Lancer l'API et le worker
+## Features
 
-```sh
-export RECO_DATABASE_URL=postgresql://postgres:postgres@localhost:5433/postgres
-export RECO_REDIS_URL=redis://localhost:6380/0
-
-uv run python -m swipread_reco api
-uv run python -m swipread_reco worker
-```
-
-Si le paquet installé en mode éditable n'est pas importable (`ModuleNotFoundError: swipread_reco`), préfixer par `PYTHONPATH=src` :
-
-```sh
-PYTHONPATH=src uv run python -m swipread_reco api
-```
-
-## Variables d'environnement
-
-| Variable | Défaut | Rôle |
+| Recommendations | Explanation | Platform |
 | --- | --- | --- |
-| `RECO_DATABASE_URL` | obligatoire | DSN PostgreSQL (api et worker) |
-| `RECO_REDIS_URL` | obligatoire | URL Redis (api et worker) |
-| `RECO_HOST` | `127.0.0.1` | adresse d'écoute de l'api ; mettre `0.0.0.0` dans un conteneur |
-| `RECO_PORT` | `8081` | port de l'api ; celui qu'appelle le backend par défaut (`SWIPREAD_RECO_URL=http://localhost:8081`) |
-| `RECO_STREAM_CONSUMER` | `worker` | nom du worker dans le groupe `reco` du flux `events` ; stable d'un redémarrage à l'autre, pour reprendre les messages lus mais pas acquittés. Un seul worker à la fois |
-| `RECO_DB_TIMEOUT_S` | `2` | attente maximale d'une connexion PostgreSQL, en secondes. Au-dessus de la coupure à 300 ms du backend : à baisser en production |
-| `RECO_<PARAM>` | valeurs de la section 10 | surcharge d'un paramètre de `Params` : nom du champ en majuscules, par ex. `RECO_P_MAX=0.5`, `RECO_DUP_SIM=0.85` |
+| A batch of up to 100 article ids per call, in display order, each with a score and a reason (`similar`, `onboarding`, `explore`) | Every batch saved with the score breakdown of each card | Two processes from one package: `api` and `worker` |
+| The reader's chosen topics as the base of the feed, their interactions reshaping it | Per-reader route: topic weights and shares, liked and rejected articles, last weight changes | The algorithm in pure functions: no database, Redis or clock inside, fully deterministic |
+| A strong signal (like, save, share, complete read) puts its topic first in the next batch | Per-batch route: the saved batch with each card's title and score terms | Catalogue kept in memory, reloaded every minute |
+| A hidden topic the reader never liked leaves the feed | Parameters and model version saved with every batch | Articles encoded with a multilingual embedding model on CPU |
+| No repeat, no two articles on the same story, varied sources | | Reader profiles kept up to date from the API's events stream, checked against the event log at each request |
+| | | Fallback lists per topic in Redis for when the recommender is down |
 
-## Base de données et rôle restreint
+## How it works
 
-La reco ne crée ni le schéma `reco` ni l'extension `vector` : ils viennent des migrations du backend. Elle se connecte avec un rôle membre du rôle de groupe `swipread_reco` (migration V5 du backend) : lecture seule sur `app`, création de tables et lecture-écriture sur `reco`. Au démarrage, l'api et le worker créent les quatre tables de la reco (`feed_requests`, `feed_items`, `article_embeddings`, `user_profiles`) si elles manquent. La base doit avoir reçu la migration V8 du backend, qui supprime son ancienne table `reco.user_profiles`. Détail : [`docs/database.md`](docs/database.md).
+**A model you can explain.** Each reader has one weight per topic, starting from the topics they chose. Every interaction gives the article a value (a quick skip is slightly negative, a long view, an open or a read positive, a like or save the most, a hide strongly negative) and moves the weight of its topic by the change. The weights decide how many cards each topic gets in a batch, capped at 60 %, interleaved so that every page of 10 keeps the proportions. → [Algorithm](docs/algo_reco.md)
 
-## Lancer à côté du backend
+**A score per article.** Within a topic, articles are ranked by closeness to what the reader liked (cosine similarity of embeddings, recentred on the catalogue), freshness (48-hour half-life) and a penalty for resemblance to what they rejected. Liking an article about AI also brings closer an economy article about AI. → [Algorithm](docs/algo_reco.md)
 
-Le profil `dev` du backend inclut le profil `mock-reco` (groupe de profils de son `application.yaml`) : avec `dev` ou `test`, le backend ne contacte jamais la reco et sert des articles tirés au hasard. Il n'appelle la reco (`HttpRecommendationClient`, `POST $SWIPREAD_RECO_URL/v1/recommendations`, coupure à 300 ms) que démarré **sans profil**. Sans profil, il ne lance pas non plus Docker Compose : PostgreSQL, Redis et la clé JWT se passent par variables d'environnement. Recette vérifiée (c'est celle de `scripts/e2e.sh`) :
+**The echo of a strong signal.** After a like, save, share or complete read, the next batch starts with that topic, unless the stock the API kept already holds a card of it. Without that exception, a series of likes would reduce the feed to one topic.
 
-1. Dans le dépôt du backend, démarrer ses conteneurs et lire les ports que Docker leur a donnés :
+**Profiles kept fresh, never trusted blindly.** The worker reads the API's `events` stream in its own consumer group and recomputes the profile of each reader who did something, from the event log, which the API writes before publishing. A request uses the stored profile only if it was computed from the same events, topics and parameters; otherwise it replays the log. A batch asked for right after a like therefore always includes it, even if its message has not been read yet. → [Database](docs/database.md)
 
-   ```sh
-   docker compose up -d
-   docker compose port postgres 5432    # -> 0.0.0.0:<port postgres>
-   docker compose port redis 6379       # -> 0.0.0.0:<port redis>
-   ```
+**Nothing kept on a deleted account.** On the API's `user_deleted` message, the worker deletes the reader's profile and saved batches at once; an hourly purge does the same for any account gone from the database, and drops batches older than 30 days.
 
-2. Construire puis lancer le backend sans profil, avec les données d'exemple de `dev` :
+## Getting started
 
-   ```sh
-   ./mvnw -DskipTests package
-   SPRING_DATASOURCE_URL=jdbc:postgresql://localhost:<port postgres>/swipread \
-   SPRING_DATASOURCE_USERNAME=swipread SPRING_DATASOURCE_PASSWORD=swipread \
-   SPRING_DATA_REDIS_HOST=localhost SPRING_DATA_REDIS_PORT=<port redis> \
-   SPRING_FLYWAY_LOCATIONS=classpath:db/migration,classpath:db/seed,classpath:db/dev-data \
-   SWIPREAD_JWT_SECRET=<32 caractères ou plus> \
-   SWIPREAD_AUTH_REFRESH_COOKIE_SECURE=false \
-   SWIPREAD_RECO_URL=http://localhost:8081 \
-   java -jar target/api-0.0.1-SNAPSHOT.jar
-   ```
+Requirements: Python 3.12, [uv](https://docs.astral.sh/uv/) and Docker.
 
-   `SPRING_FLYWAY_LOCATIONS` reprend les migrations de `dev` : 8 thèmes, 300 articles d'exemple, le compte admin. Le journal doit dire `No active profile set` ; un appel à la reco qui échoue y laisse `Recommendation service unavailable`. Vérifié sur une base neuve. La FAQ du backend prévient que, sans profil et sans ces emplacements, Flyway refuse une base qui a reçu les données de `dev` (« Detected applied migration not resolved locally ») ; avec eux, les mêmes migrations sont résolues. Ajouter `SERVER_PORT` si 8080 est pris, `SWIPREAD_CORS_ALLOWED_ORIGINS=http://localhost:5173` pour le front web.
-3. Créer le rôle de connexion de la reco, en superutilisateur (dans ce conteneur, `swipread` l'est) :
-
-   ```sql
-   CREATE ROLE reco_service LOGIN PASSWORD 'reco' IN ROLE swipread_reco;
-   ```
-
-4. Lancer la reco sur ce PostgreSQL et ce Redis, une fois les migrations du backend passées (la reco s'arrête si le schéma `reco` manque) :
-
-   ```sh
-   export RECO_DATABASE_URL=postgresql://reco_service:reco@localhost:<port postgres>/swipread
-   export RECO_REDIS_URL=redis://localhost:<port redis>/0
-   uv run python -m swipread_reco worker   # encode les articles, écrit fallback:{slug}
-   uv run python -m swipread_reco api      # écoute sur 127.0.0.1:8081
-   ```
-
-Le client HTTP du backend (celui du JDK) propose à chaque nouvelle connexion de passer en HTTP/2 (`Upgrade: h2c`) ; uvicorn refuse et répond en HTTP/1.1, en écrivant `Unsupported upgrade request` dans son journal. C'est sans effet sur les réponses.
-
-## Tests de bout en bout
-
-`scripts/e2e.sh` fait tourner le vrai backend avec la reco et vérifie, par l'API publique du backend comme le front web, les scénarios E1 à E11 de `tests/e2e/` (inscription, choix des thèmes, pages du fil, likes, masquages, panne de la reco, latence, profil tenu à jour par le flux `events`, compte supprimé).
-
-Prérequis : JDK 25, Docker démarré, uv, une copie du dépôt Swipread/api, le modèle `intfloat/multilingual-e5-small` dans le cache Hugging Face (le worker tourne avec `HF_HUB_OFFLINE=1` ; mettre `HF_HUB_OFFLINE=0` pour le télécharger au premier lancement).
-
-```sh
-SWIPREAD_API_DIR=../swipread-api scripts/e2e.sh          # tout lancer, tester, tout arrêter
-SWIPREAD_API_DIR=../swipread-api scripts/e2e.sh --keep   # laisser tourner après les tests
-scripts/e2e.sh down                                      # arrêter ce que --keep a laissé
+```bash
+git clone https://github.com/Swipread/reco.git
+cd reco
+uv sync
+docker compose up -d          # PostgreSQL 17 + pgvector on 5433, Redis 7.4 on 6380
+uv run pytest -m "not perf"   # unit, API and acceptance tests
 ```
 
-Les arguments après `--keep` (ou à la place) vont à pytest, par exemple `-k e4 -q`. Le script :
+The service needs the API's schema (its Flyway migrations create the `app` and `reco` schemas and the recommender's role): to see it serve batches, run it next to the API, as described in [Getting started](docs/getting-started.md). Once both run:
 
-1. lance le PostgreSQL et le Redis du `compose.yaml` du backend sous le projet Compose `swipread-e2e` (`E2E_COMPOSE_PROJECT` pour en changer), sur des ports choisis par Docker ;
-2. construit le backend s'il a changé (`./mvnw -DskipTests package`, dans son dépôt) et le lance sans profil, comme ci-dessus, sur un port libre ;
-3. crée le rôle `reco_e2e`, membre de `swipread_reco`, et écrit les données de test (`tests/e2e/seed.py`) : les 300 articles d'exemple répartis sur 6 sources, republiés sur les 10 derniers jours, avec des embeddings synthétiques par thème (géométrie de la section 11.1 de la spec) ; un quasi-doublon d'un article ; 6 articles en français sans embedding, pour le worker ;
-4. lance le worker et l'api de la reco sous le rôle `reco_e2e`, sur un port libre, attend que l'api réponde et que le worker ait écrit les listes de repli ;
-5. lance `pytest -m e2e`, affiche les mesures (`measures.txt`), puis arrête tout et supprime les conteneurs.
-
-Les journaux de chaque processus vont dans un dossier temporaire dont le chemin est affiché. Un lancement complet prend environ 1 min 30 (dont une trentaine de secondes de chargement du modèle par le worker) ; le premier construit le backend et télécharge ses dépendances Maven, compter quelques minutes de plus. Sans les variables `E2E_*` que le script exporte, `uv run pytest` ignore ces tests.
+```bash
+uv run python -m swipread_reco worker   # encodes articles, writes fallback lists, reads the stream
+uv run python -m swipread_reco api      # listens on 127.0.0.1:8081
+curl -s localhost:8081/healthz
+```
 
 ## Routes
 
-Les routes ne sont pas authentifiées : l'api ne doit être joignable que depuis le réseau interne.
+The routes are not authenticated: the api must only be reachable from the internal network.
 
-- `POST /v1/recommendations` : lot d'articles pour un lecteur (contrat backend)
-- `GET /healthz` : état et taille du catalogue en mémoire
-- `GET /v1/explain/users/{userId}` : poids par thème, articles aimés et rejetés, historique des changements de poids
-- `GET /v1/explain/requests/{requestId}` : lot enregistré, avec le détail du score de chaque carte
+| Route | |
+| --- | --- |
+| `POST /v1/recommendations` | A batch for a reader: `userId`, `count`, `exclude` (the stock the API keeps), `context` |
+| `GET /healthz` | Status, size and age of the in-memory catalogue |
+| `GET /v1/explain/users/{userId}` | Topic weights and shares, liked and rejected articles, last 50 weight changes |
+| `GET /v1/explain/requests/{requestId}` | A saved batch, with the score breakdown of each card |
 
-## Rapport pour le jury
+The request and response formats are the API's: [API reference](https://github.com/Swipread/api/blob/main/docs/api.md).
 
-```sh
-PYTHONPATH=src uv run python -m swipread_reco.sim.report --out report/
+## Project structure
+
+```text
+src/swipread_reco/
+├── __main__.py       entry point: python -m swipread_reco api | worker
+├── api.py            POST /v1/recommendations, /healthz
+├── explain.py        explanation routes
+├── recommend.py      the pipeline: profile, score, allocation, assembly
+├── profile.py        replay of the events into a profile (pure)
+├── profiles.py       stored profile: fresh, or replayed and stored again
+├── scoring.py        closeness, freshness, penalty
+├── allocation.py     shares per topic and their order in the batch
+├── assemble.py       filling the batch: same story, varied sources
+├── catalog_cache.py  in-memory catalogue, reloaded in the background
+├── params.py         every tunable parameter, overridable by environment
+├── models.py         shared data types
+├── store.py          all the SQL, behind the Store protocol
+├── worker/           encoding, fallback lists, purge, events stream consumer
+└── sim/              simulated catalogue and readers, report for the jury
+sql/app_schema.sql    copy of the API's migrations, for the integration tests
+scripts/e2e.sh        end-to-end run against the real API
 ```
 
-Écrit `report/report.md` et `report/report.csv` : quatre lecteurs simulés sur 100 cartes, mesurés page par page (spec 11.3). Options : `--cards N`, `--seed N`.
+## Testing
+
+```bash
+uv run pytest -m "not perf"   # 217 unit, API and acceptance tests, no infrastructure
+uv run ruff check
+RECO_TEST_DSN=postgresql://postgres:postgres@localhost:5433/postgres uv run pytest tests/integration -q
+```
+
+The 24 integration tests rebuild the API's schema in a disposable database and run as a member of the recommender's role, which proves its rights are enough. GitHub Actions runs the lint, the unit and the integration tests on every push and pull request. Apart: a performance test (`-m perf`, 80 ms at the 95th percentile for 5,000 articles) and 11 end-to-end scenarios against the real API (`scripts/e2e.sh`). → [Testing](docs/testing.md)
+
+A report on four simulated readers over 100 cards, page by page, is written by `uv run python -m swipread_reco.sim.report --out report/`.
+
+## Configuration
+
+Both processes read their settings from environment variables: `RECO_DATABASE_URL`, `RECO_REDIS_URL`, `RECO_DB_TIMEOUT_S`; the api also `RECO_HOST` and `RECO_PORT`, the worker `RECO_STREAM_CONSUMER`. Every parameter of the algorithm can be overridden with `RECO_<NAME>`, for instance `RECO_P_MAX=0.5`. → [Getting started](docs/getting-started.md#environment-variables)
+
+## Project status
+
+The algorithm of the specification is implemented with its acceptance tests and explanation routes, and the interface with the API follows contract v1.5: the recommender consumes the events stream and keeps reader profiles. It runs next to the real API in the end-to-end tests. Not deployed yet: production serves the API's fallback feed until the recommender is packaged (container image, release workflow) and added to the server.
+
+## Documentation
+
+| | |
+| --- | --- |
+| **Guides** | [Getting started](docs/getting-started.md) · [Testing](docs/testing.md) · [Database](docs/database.md) |
+| **Reference** | [Algorithm specification](docs/algo_reco.md) |
+
+## License
+
+© 2026 Swipread. All rights reserved.
+
+The source is published for reference only; no license is granted to use, copy, modify or distribute it without written permission from Swipread.
