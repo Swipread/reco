@@ -1,29 +1,49 @@
-# Base de données de la reco
+# Database
 
-Le schéma `app`, l'extension `vector` et le schéma `reco` sont créés par les migrations Flyway du backend : ils font foi, et sont décrits dans [`docs/database.md` de Swipread/api](https://github.com/Swipread/api/blob/main/docs/database.md). Ce document liste seulement ce que la reco lit dans `app`, les tables qu'elle crée dans `reco` et les droits dont elle a besoin. État aligné sur Swipread/api au commit 48055c3 (migrations V1 à V8).
+The `app` schema, the `vector` extension and the `reco` schema are created by the API's Flyway migrations: they are the reference, described in the [database page of Swipread/api](https://github.com/Swipread/api/blob/main/docs/database.md). This page lists only what the recommender reads from `app`, the tables it creates in `reco` and the rights it needs. Aligned with Swipread/api at commit 48055c3 (migrations V1 to V8).
 
-Pour les tests, `sql/app_schema.sql` recopie ces migrations ; il est à tenir à jour à chaque nouvelle migration du backend.
+For the tests, `sql/app_schema.sql` copies these migrations; keep it up to date with each new migration of the API.
 
-## Ce que la reco lit dans `app`
+```mermaid
+flowchart LR
+    subgraph app["schema app (API, read only)"]
+        users["users"] --- user_topics["user_topics"]
+        topics["topics"] --- user_topics
+        sources["sources"] --- articles["articles"]
+        articles --- article_topics["article_topics"]
+        topics --- article_topics
+        events["events"]
+        user_articles["user_articles"]
+    end
+    subgraph reco["schema reco (recommender)"]
+        feed_requests["feed_requests"] --- feed_items["feed_items"]
+        user_profiles["user_profiles"]
+        article_embeddings["article_embeddings"]
+    end
+    events -. replay .-> user_profiles
+    articles -. encoding .-> article_embeddings
+```
 
-En lecture seule ; la reco n'écrit jamais dans `app`.
+## What the recommender reads in `app`
 
-| Table | Colonnes lues | Usage |
+Read only; the recommender never writes to `app`.
+
+| Table | Columns read | Use |
 | --- | --- | --- |
-| `app.users` | `id`, `locale` | Utilisateur connu (404 sinon), langue par défaut ; purge des lots des comptes supprimés |
-| `app.topics` | `id`, `slug`, `label` | Liste des thèmes, slugs des listes `fallback:{slug}` |
-| `app.user_topics` | `user_id`, `topic_id` | Thèmes choisis |
-| `app.sources` | `id`, `active` | Seuls les articles des sources actives sont recommandables |
-| `app.articles` | `id`, `source_id`, `title`, `summary`, `language`, `word_count`, `published_at`, `ingested_at` | Catalogue, encodage, titres des routes d'explication. `embedding` n'est ni lu ni écrit |
-| `app.article_topics` | `article_id`, `topic_id`, `confidence` | Thème principal d'un article |
-| `app.events` | `event_id`, `user_id`, `type`, `article_id`, `payload`, `occurred_at`, `received_at` | Rejeu du profil et repère de `reco.user_profiles`. Types lus : `view`, `open`, `read`, `like`, `unlike`, `save`, `unsave`, `share`, `hide` ; les lignes sans `article_id` sont ignorées |
-| `app.user_articles` | `user_id`, `article_id` | Articles déjà vus par le lecteur, exclus des lots |
+| `app.users` | `id`, `locale` | Known user (404 otherwise), default language; purge of the batches and profiles of deleted accounts |
+| `app.topics` | `id`, `slug`, `label` | List of topics, slugs of the `fallback:{slug}` lists |
+| `app.user_topics` | `user_id`, `topic_id` | Chosen topics |
+| `app.sources` | `id`, `active` | Only the articles of active sources are recommendable |
+| `app.articles` | `id`, `source_id`, `title`, `summary`, `language`, `word_count`, `published_at`, `ingested_at` | Catalogue, encoding, titles of the explanation routes. `embedding` is neither read nor written |
+| `app.article_topics` | `article_id`, `topic_id`, `confidence` | Main topic of an article |
+| `app.events` | `event_id`, `user_id`, `type`, `article_id`, `payload`, `occurred_at`, `received_at` | Replay of the profile and mark of `reco.user_profiles`. Types read: `view`, `open`, `read`, `like`, `unlike`, `save`, `unsave`, `share`, `hide`; rows without `article_id` are ignored |
+| `app.user_articles` | `user_id`, `article_id` | Articles the reader already met, left out of the batches |
 
-Le backend n'a ni statut d'article ni `cluster_id` : tout article d'une source active est actif, et la règle « même actualité » repose sur la seule ressemblance (`algo_reco.md`, 7.2).
+The API has neither an article status nor a `cluster_id`: every article of an active source is active, and the "same story" rule rests on similarity alone ([specification](algo_reco.md), 7.2).
 
-## Tables de `reco`
+## Tables of `reco`
 
-Créées par le service au démarrage (`PgStore.ensure_schema`), si elles n'existent pas. Le schéma `reco` doit exister (migration V1 du backend) : le service ne le crée pas et s'arrête avec un message explicite s'il manque, si le type `vector` manque, ou si `reco.user_profiles` est encore l'ancienne table du backend (créée par V1, supprimée par sa migration V8 : lancer les migrations du backend d'abord).
+Created by the service at start (`PgStore.ensure_schema`), if they do not exist. The `reco` schema must exist (API migration V1): the service does not create it and stops with an explicit message if it is missing, if the `vector` type is missing, or if `reco.user_profiles` is still the API's old table (created by V1, dropped by its migration V8: run the API's migrations first).
 
 ```sql
 CREATE TABLE IF NOT EXISTS reco.feed_requests (
@@ -53,46 +73,45 @@ CREATE TABLE IF NOT EXISTS reco.feed_items (
 
 CREATE TABLE IF NOT EXISTS reco.user_profiles (
   user_id          text PRIMARY KEY,
-  basis            jsonb NOT NULL,             -- ce dont dépend le rejeu, hors événements
-  state            jsonb NOT NULL,             -- résultat du rejeu
-  events_count     int  NOT NULL,              -- repère : nombre d'événements rejoués
-  last_occurred_at timestamptz,                -- repère : dernier événement (contrat v1.5)
+  basis            jsonb NOT NULL,             -- what the replay depends on, events aside
+  state            jsonb NOT NULL,             -- result of the replay
+  events_count     int  NOT NULL,              -- mark: number of events replayed
+  last_occurred_at timestamptz,                -- mark: last event (contract v1.5)
   last_event_id    text,
   computed_at      timestamptz NOT NULL
 );
 
 CREATE TABLE IF NOT EXISTS reco.article_embeddings (
-  article_id  text PRIMARY KEY,                -- pas de clé étrangère : aucun droit REFERENCES sur app
+  article_id  text PRIMARY KEY,                -- no foreign key: no REFERENCES right on app
   embedding   vector(384) NOT NULL,
   model       text NOT NULL,
   embedded_at timestamptz NOT NULL
 );
 ```
 
-- `feed_requests` et `feed_items` : chaque lot calculé et ses cartes ; contenu des colonnes `jsonb` dans `algo_reco.md`, section 9.
-- `article_embeddings` : un embedding par article, écrit par le worker. Seules les lignes du modèle courant (`multilingual-e5-small`) sont lues ; une ligne d'un autre modèle est réencodée et remplacée (`algo_reco.md`, 8.4).
-- Purge horaire (`algo_reco.md`, 8.7) : lots de plus de 30 jours ou d'utilisateurs absents de `app.users`, embeddings d'articles absents de `app.articles`.
+- `feed_requests` and `feed_items`: each batch computed and its cards; content of the `jsonb` columns in the [specification](algo_reco.md), section 9.
+- `article_embeddings`: one embedding per article, written by the worker. Only the rows of the current model (`multilingual-e5-small`) are read; a row of another model is encoded again and replaced (specification, 8.4).
+- `user_profiles` (contract v1.5, specification 8.6): each reader's profile, kept up to date by the worker from the `events` stream and checked at each request. It is used only if its mark and basis are those of the moment; otherwise it is replayed from `app.events` and replaced.
+  - Mark: `events_count`, `last_occurred_at` and `last_event_id` of the reader's events that count for the profile (types of specification 4.1, with an article).
+  - `basis`: `{ "modelVersion": …, "params": {parameters of section 10}, "topics": [ids of app.topics], "chosen": [chosen ids, sorted] }`.
+  - `state`: `{ "weights": [[topicId, weight]…], "liked": [[articleId, strength, lastEvent]…], "rejected": […], "touched": [articleIds], "history": [[eventId, type, articleId, topicId, δ, weightAfter, occurredAt]…] }`. Lists rather than objects wherever order matters: `jsonb` does not keep the order of keys. The strengths are those before the age factor; `history` keeps the last 50 weight changes.
+  - Deleted at once on `user_deleted`, and at the hourly purge if the reader is no longer in `app.users`.
+- Hourly purge (specification, 8.7): batches older than 30 days or of users absent from `app.users`, profiles of users absent from `app.users`, embeddings of articles absent from `app.articles`.
 
-- `user_profiles` (contrat v1.5, `algo_reco.md` 8.6) : le profil de chaque lecteur, tenu à jour par le worker depuis le flux `events` et vérifié à chaque demande. Il n'est utilisé que si son repère et sa base sont ceux du moment, sinon il est rejoué depuis `app.events` et remplacé.
-  - Repère : `events_count`, `last_occurred_at` et `last_event_id` des événements du lecteur qui comptent pour le profil (types de `algo_reco.md` 4.1, avec article).
-  - `basis` : `{ "modelVersion": …, "params": {paramètres de la section 10}, "topics": [ids de app.topics], "chosen": [ids choisis, triés] }`.
-  - `state` : `{ "weights": [[topicId, poids]…], "liked": [[articleId, force, dernierÉvénement]…], "rejected": […], "touched": [articleIds], "history": [[eventId, type, articleId, topicId, δ, poidsAprès, occurredAt]…] }`. Des listes plutôt que des objets là où l'ordre compte : `jsonb` ne garde pas l'ordre des clés. Les forces sont celles d'avant le facteur d'ancienneté ; `history` garde les 50 derniers changements de poids.
-  - Supprimé tout de suite sur `user_deleted`, et à la purge horaire si le lecteur n'est plus dans `app.users`.
+The API creates no table in `reco` since its migration V8, which dropped the `reco.user_profiles` and `reco.model_runs` of its migration V1, never used.
 
-Le backend ne crée aucune table dans `reco` depuis sa migration V8, qui a supprimé les `reco.user_profiles` et `reco.model_runs` de sa migration V1, jamais utilisées.
+## Rights
 
-## Droits
-
-Le service se connecte avec un rôle membre du rôle de groupe `swipread_reco`, créé par la migration V5 du backend :
+The service connects with a login role member of the group role `swipread_reco`, created by the API's migration V5:
 
 ```sql
 CREATE ROLE reco_service LOGIN PASSWORD '…' IN ROLE swipread_reco;
 ```
 
-| Schéma | Droits de `swipread_reco` (V5) | Utilisés par la reco |
+| Schema | Rights of `swipread_reco` (V5) | Used by the recommender |
 | --- | --- | --- |
-| `app` | `USAGE` ; `SELECT` sur toutes les tables, sauf `app.users` limité à `id`, `locale`, `created_at` ; rien sur `app.event_outbox` ni `app.refresh_tokens` | `SELECT` sur les colonnes listées plus haut |
-| `reco` | `USAGE`, `CREATE` ; `SELECT`, `INSERT`, `UPDATE`, `DELETE` sur les tables | Création de ses quatre tables, lecture et écriture |
-| base | aucun `CREATE` | aucun : le service ne crée ni schéma ni extension |
+| `app` | `USAGE`; `SELECT` on every table, except `app.users` limited to `id`, `locale`, `created_at`; nothing on `app.event_outbox` or `app.refresh_tokens` | `SELECT` on the columns listed above |
+| `reco` | `USAGE`, `CREATE`; `SELECT`, `INSERT`, `UPDATE`, `DELETE` on the tables | Creation of its four tables, read and write |
+| database | no `CREATE` | none: the service creates neither a schema nor an extension |
 
-Les tests d'intégration le vérifient : ils se connectent avec un rôle `reco_test` membre de `swipread_reco`, sur une copie des migrations du backend.
+The integration tests check it: they connect with a role `reco_test` member of `swipread_reco`, on a copy of the API's migrations.

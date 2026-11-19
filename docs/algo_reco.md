@@ -1,476 +1,478 @@
-# Algorithme de recommandation — spécification v1
+# Recommendation algorithm — specification v1
 
-Document de travail pour l'équipe qui code le service de reco. Il remplace le premier jet (schémas seuls). Il se lit avec le contrat backend/reco (document interne aux équipes, partagé hors de git) et [`docs/api.md` de Swipread/api](https://github.com/Swipread/api/blob/main/docs/api.md), qui font référence pour les échanges ; en cas de désaccord sur un format d'échange, ce sont eux qui ont raison.
+Working document for the team that codes the recommendation service. It replaces the first draft (schemas only). Read it with the backend/recommender contract (an internal document of the teams, shared outside git) and the [API reference of Swipread/api](https://github.com/Swipread/api/blob/main/docs/api.md), which are the reference for the exchanges: where they disagree with this document on an exchange format, they are right.
 
-## 1. Intention
+Section numbers are stable: the code refers to them ("spec 4.2").
 
-Swipread est présenté en démo devant un jury, sans lecteurs réels. Le jury note le produit et la qualité technique de l'algo. Deux choses doivent donc être vraies :
+## 1. Intent
 
-- le fil s'adapte de façon visible aux interactions d'une seule personne, en direct ;
-- on peut expliquer pourquoi chaque carte est sortie, chiffres à l'appui.
+Swipread is shown in a demo to a jury, without real readers. The jury grades the product and the technical quality of the algorithm. Two things must therefore be true:
 
-D'où le parti pris : un modèle entièrement explicite (des poids par thème et une formule de score), sans apprentissage sur des volumes de données qui n'existent pas.
+- the feed visibly adapts to the interactions of a single person, live;
+- we can explain why each card came out, figures included.
 
-### Objectifs
+Hence the choice: a fully explicit model (weights per topic and a score formula), with no learning on volumes of data that do not exist.
 
-- Les thèmes choisis à l'inscription forment la base du fil ; les interactions la font évoluer.
-- Une interaction forte sur la carte n change le fil à partir de la carte n+10 (règle du stock décidée avec le backend ; le backend actuel donne entre n+11 et n+20, section 13), et le changement est net : la première carte recalculée appartient au thème qui vient d'être aimé, sauf si une carte de ce thème attend déjà dans le stock gardé par le backend (4.4).
-- Un thème non choisi que le lecteur masque sans l'avoir jamais aimé disparaît du fil.
-- Chaque carte servie est enregistrée avec le détail de son score.
-- La qualité se mesure hors ligne avec des lecteurs simulés (section 11), qui servent aussi de tests d'acceptation.
+### Goals
 
-### Hors périmètre
+- The topics chosen at sign-up form the base of the feed; interactions make it evolve.
+- A strong interaction on card n changes the feed from card n+10 on (stock rule decided with the backend; the current backend gives between n+11 and n+20, section 13), and the change is clear: the first recomputed card belongs to the topic just liked, unless a card of that topic already waits in the stock the backend kept (4.4).
+- An unchosen topic that the reader hides without ever having liked it leaves the feed.
+- Every card served is saved with the breakdown of its score.
+- Quality is measured offline with simulated readers (section 11), which are also the acceptance tests.
 
-- Modèle de classement appris (LightGBM ou autre), statistiques de popularité, filtrage collaboratif, A/B test, vecteur de session séparé. La section 14 dit ce qu'on en ferait avec du trafic.
-- Le consentement à la personnalisation (`app.users.personalization_consent_at`) : il n'existe pas dans `api.md`, le service l'ignore.
-- L'écran qui montre les explications au jury. Le service expose les données (section 9) ; leur affichage est à décider.
+### Out of scope
 
-### Ce qui serait un échec même si tout tourne
+- A learned ranking model (LightGBM or other), popularity statistics, collaborative filtering, A/B tests, a separate session vector. Section 14 says what we would do with them given traffic.
+- Consent to personalisation (`app.users.personalization_consent_at`): it does not exist in the API, the service ignores it.
+- The screen that shows the explanations to the jury. The service exposes the data (section 9); how to display it is to be decided.
 
-- Une carte dont on ne sait pas dire pourquoi elle est sortie.
-- Un article de politique servi juste après un « pas intéressé » sur la politique, thème non choisi.
-- Un fil qui se réduit à un seul thème après quelques likes.
-- Deux exécutions identiques (même base, même horloge, même graine) qui donnent deux lots différents.
+### What would be a failure even if everything runs
 
-## 2. Vue d'ensemble
+- A card nobody can say why it came out.
+- A politics article served right after a "not interested" on politics, an unchosen topic.
+- A feed that shrinks to a single topic after a few likes.
+- Two identical runs (same database, same clock, same seed) that give two different batches.
+
+## 2. Overview
 
 ```mermaid
 flowchart LR
-    EVT["app.events<br/>du lecteur"] --> PROF["Profil<br/>poids par thème<br/>articles aimés / rejetés"]
+    EVT["app.events<br/>of the reader"] --> PROF["Profile<br/>weight per topic<br/>liked / rejected articles"]
     UT["app.user_topics"] --> PROF
-    CAT["Catalogue en mémoire<br/>articles récents + embeddings"] --> SCORE["Score par article<br/>proximité, fraîcheur, rejet"]
+    CAT["In-memory catalogue<br/>recent articles + embeddings"] --> SCORE["Score per article<br/>closeness, freshness, rejection"]
     PROF --> SCORE
-    PROF --> ALLOC["Répartition des places<br/>entre thèmes"]
-    SCORE --> LOT["Assemblage du lot<br/>sans doublon, sources variées"]
+    PROF --> ALLOC["Allocation of the places<br/>between topics"]
+    SCORE --> LOT["Assembly of the batch<br/>no duplicate, varied sources"]
     ALLOC --> LOT
-    LOT --> REP["Réponse<br/>IDs + score + reason"]
+    LOT --> REP["Response<br/>ids + score + reason"]
     LOT --> LOG["reco.feed_requests<br/>reco.feed_items"]
 ```
 
-À chaque appel `POST /v1/recommendations`, le service :
+At each `POST /v1/recommendations` call, the service:
 
-1. prend le profil du lecteur enregistré dans `reco.user_profiles` s'il est à jour, ou le reconstruit en rejouant ses événements depuis `app.events` (section 4, 8.6) ;
-2. note chaque article candidat (section 5) ;
-3. répartit les places du lot entre les thèmes selon les poids (section 6) ;
-4. remplit chaque place avec le meilleur article du thème (section 7) ;
-5. enregistre le lot et son explication, puis répond.
+1. takes the reader's profile stored in `reco.user_profiles` if it is up to date, or rebuilds it by replaying their events from `app.events` (section 4, 8.6);
+2. scores each candidate article (section 5);
+3. allocates the places of the batch between topics according to the weights (section 6);
+4. fills each place with the best article of the topic (section 7);
+5. saves the batch and its explanation, then answers.
 
-Le profil reste une fonction pure de l'historique : celui qu'enregistre `reco.user_profiles` (contrat v1.5) n'en est qu'une copie, utilisée seulement si elle a été calculée sur les mêmes événements, les mêmes thèmes et les mêmes paramètres (8.6). Conséquences voulues : pas de course entre l'arrivée d'un événement et le recalcul, rejouer deux fois donne le même résultat, et changer un paramètre recalcule tous les profils sans migration.
+The profile remains a pure function of the history: the one `reco.user_profiles` keeps (contract v1.5) is only a copy, used only if it was computed on the same events, the same topics and the same parameters (8.6). Intended consequences: no race between the arrival of an event and the recomputation, replaying twice gives the same result, and changing a parameter recomputes every profile without a migration.
 
-## 3. Vocabulaire et données d'entrée
+## 3. Vocabulary and input data
 
-| Terme | Définition |
+| Term | Definition |
 | --- | --- |
-| Thème | Une ligne de `app.topics`. La liste est finie ; on note K leur nombre. |
-| Thème choisi | Thème présent dans `app.user_topics` pour le lecteur, au moment de la requête. |
-| Thème principal d'un article | Dans `app.article_topics`, le thème de plus forte `confidence` ; à égalité, le plus petit `topic_id`. Un article sans thème n'est jamais recommandé. |
-| Embedding | Vecteur de 384 nombres, de norme 1, qui résume le sens d'un article (section 8). |
-| Lot | La liste d'articles renvoyée par un appel à `/v1/recommendations`. |
-| Catalogue | Les articles recommandables, gardés en mémoire par le service (section 8). |
+| Topic | A row of `app.topics`. The list is finite; K is their number. |
+| Chosen topic | A topic in `app.user_topics` for the reader, at the time of the request. |
+| Main topic of an article | In `app.article_topics`, the topic of highest `confidence`; on a tie, the lowest `topic_id`. An article without a topic is never recommended. |
+| Embedding | A vector of 384 numbers, of norm 1, that sums up the meaning of an article (section 8). |
+| Batch | The list of articles returned by a call to `/v1/recommendations`. |
+| Catalogue | The recommendable articles, kept in memory by the service (section 8). |
 
-Le schéma `app` est celui que créent les migrations du backend (Swipread/api) ; [database.md](database.md) liste ce que la reco en lit et définit les trois tables de `reco` qui appartiennent au service. Le service lit `app` en lecture seule, sans exception, et écrit dans `reco` : ce sont exactement les droits du rôle `swipread_reco` créé par le backend (section 13).
+The `app` schema is the one the backend's migrations create (Swipread/api); [database.md](database.md) lists what the recommender reads from it and defines the four `reco` tables that belong to the service. The service reads `app` read-only, without exception, and writes to `reco`: exactly the rights of the `swipread_reco` role created by the backend (section 13).
 
-Le service dépend de l'ingestion pour deux choses : des articles dans `app.articles` et au moins un thème par article dans `app.article_topics`. Le backend n'a pas de statut d'article : tout article d'une source active compte comme actif. Il n'a pas non plus de `cluster_id` : la règle « même actualité » repose sur la seule ressemblance (7.2). Tant que l'ingestion n'existe pas, le développement s'appuie sur le catalogue synthétique de la section 11 et sur les articles d'exemple du backend (section 13).
+The service depends on the ingestion for two things: articles in `app.articles` and at least one topic per article in `app.article_topics`. The backend has no article status: every article of an active source counts as active. It has no `cluster_id` either: the "same story" rule rests on similarity alone (7.2). Development relies on the synthetic catalogue of section 11 and on the backend's sample articles (section 13).
 
-Tous les paramètres chiffrés sont regroupés en section 10. Dans le texte ils apparaissent sous leur nom (`V_LIKE`, `EPSILON`…).
+All numeric parameters are gathered in section 10. In the text they appear by name (`V_LIKE`, `EPSILON`…).
 
-## 4. Profil du lecteur
+## 4. Reader profile
 
-Le profil contient trois choses : un poids par thème, la liste des articles aimés et la liste des articles rejetés.
+The profile holds three things: a weight per topic, the list of liked articles and the list of rejected articles.
 
-### 4.1 Valeur d'un article pour le lecteur
+### 4.1 Value of an article for the reader
 
-Pour chaque couple (lecteur, article), les événements de type `view`, `open`, `read`, `like`, `unlike`, `save`, `unsave`, `share`, `hide` mettent à jour un état :
+For each (reader, article) pair, the events of type `view`, `open`, `read`, `like`, `unlike`, `save`, `unsave`, `share`, `hide` update a state:
 
-| Événement | Effet sur l'état |
+| Event | Effect on the state |
 | --- | --- |
-| `view` avec `dwellMs < T_SKIP` | `zappé = vrai` |
-| `view` avec `dwellMs ≥ T_LONG` | `vue_longue = vrai` |
-| `view` entre les deux | aucun |
-| `open` | `ouvert = vrai` |
-| `read` | `lecture = max(lecture, c)` avec `c = min(1, readMs / durée_attendue)` et `durée_attendue = word_count / 230 × 60 000` ms. Si `word_count` est nul ou absent, `durée_attendue = 60 000`. `scrollDepth` n'entre pas dans la valeur et peut manquer : le front web ne le mesure pas. |
-| `like` / `unlike` | `aimé = vrai` / `aimé = faux` |
-| `save` / `unsave` | `sauvé = vrai` / `sauvé = faux` |
-| `share` | `partagé = vrai` |
-| `hide` | `masqué = vrai` (définitif) |
+| `view` with `dwellMs < T_SKIP` | `skipped = true` |
+| `view` with `dwellMs ≥ T_LONG` | `long_view = true` |
+| `view` in between | none |
+| `open` | `opened = true` |
+| `read` | `read = max(read, c)` with `c = min(1, readMs / expected_time)` and `expected_time = word_count / 230 × 60,000` ms. If `word_count` is zero or missing, `expected_time = 60,000`. `scrollDepth` does not enter the value and may be missing: the web app does not measure it. |
+| `like` / `unlike` | `liked = true` / `liked = false` |
+| `save` / `unsave` | `saved = true` / `saved = false` |
+| `share` | `shared = true` |
+| `hide` | `hidden = true` (final) |
 
-`impression` est ignoré, comme tout événement sans article (`app.events.article_id` peut être nul). `word_count` vient de `app.articles`.
+`impression` is ignored, like any event without an article (`app.events.article_id` may be null). `word_count` comes from `app.articles`.
 
-La valeur `v` de l'article se déduit de l'état :
-
-```
-si masqué :                         v = V_HIDE            (−0,15)
-sinon :
-    pos = max( V_LONG_VIEW si vue_longue,                (0,02)
-               V_OPEN si ouvert,                         (0,03)
-               V_OPEN + V_READ_BONUS × lecture si lu,    (0,03 à 0,07)
-               V_LIKE si aimé, sauvé ou partagé )        (0,08)
-    si pos > 0 :                    v = pos
-    sinon si zappé :                v = V_SKIP            (−0,02)
-    sinon :                         v = 0
-```
-
-Un article compte donc une seule fois, à la hauteur de son signal le plus fort. Vue longue, ouverture, lecture puis like sur le même article valent 0,08, pas la somme.
-
-### 4.2 Poids par thème
-
-**Départ.** Avec c thèmes choisis parmi K :
-
-- chaque thème choisi reçoit `(1 − EPSILON) / c` ;
-- chaque thème non choisi reçoit `EPSILON / (K − c)` ;
-- si c = 0 ou c = K, tous reçoivent `1 / K`.
-
-Les poids somment à 1 : un poids se lit directement comme une part du fil.
-
-**Mise à jour.** Les événements du lecteur sont rejoués du plus ancien au plus récent (tri par `occurred_at`, puis `event_id`). On rejoue au plus les `EVENTS_MAX` plus récents. Pour chaque événement, on calcule la valeur de l'article avant (`v_avant`) et après (`v_après`) ; si `δ = v_après − v_avant` est non nul, on l'applique au thème principal `t` de l'article :
+The value `v` of the article follows from the state:
 
 ```
-si δ > 0 :
+if hidden:                          v = V_HIDE            (−0.15)
+else:
+    pos = max( V_LONG_VIEW if long_view,                 (0.02)
+               V_OPEN if opened,                         (0.03)
+               V_OPEN + V_READ_BONUS × read if read,     (0.03 to 0.07)
+               V_LIKE if liked, saved or shared )        (0.08)
+    if pos > 0:                     v = pos
+    else if skipped:                v = V_SKIP            (−0.02)
+    else:                           v = 0
+```
+
+An article therefore counts once, at the level of its strongest signal. A long view, an open, a read then a like on the same article are worth 0.08, not the sum.
+
+### 4.2 Weight per topic
+
+**Start.** With c topics chosen among K:
+
+- each chosen topic gets `(1 − EPSILON) / c`;
+- each unchosen topic gets `EPSILON / (K − c)`;
+- if c = 0 or c = K, all get `1 / K`.
+
+The weights sum to 1: a weight reads directly as a share of the feed.
+
+**Update.** The reader's events are replayed from the oldest to the most recent (sorted by `occurred_at`, then `event_id`). At most the `EVENTS_MAX` most recent are replayed. For each event, the value of the article is computed before (`v_before`) and after (`v_after`); if `δ = v_after − v_before` is not zero, it is applied to the main topic `t` of the article:
+
+```
+if δ > 0:
     w[t] = w[t] + δ
-sinon :
-    plancher = 0 si (type = hide et t non choisi) sinon W_FLOOR
-    w[t] = max( w[t] + δ, min(w[t], plancher) )
-w = w / somme(w)          # renormalisation après chaque mise à jour
+else:
+    floor = 0 if (type = hide and t not chosen) else W_FLOOR
+    w[t] = max( w[t] + δ, min(w[t], floor) )
+w = w / sum(w)            # renormalisation after each update
 ```
 
-Règles associées :
+Related rules:
 
-- Un événement dont l'article est inconnu ou sans thème principal ne change pas les poids.
-- Si la somme tombe à 0, on repart des poids de départ.
-- Seul un masquage sur un thème non choisi peut amener un poids à 0, et il le fait dès que le poids est inférieur ou égal à 0,15 : c'est le cas de tout thème non choisi que le lecteur n'a pas nettement aimé auparavant. Un thème non choisi monté à 20 % par des likes redescend à 5 % au premier masquage, puis à 0 au second.
-- Un thème à 0 ne reçoit plus de place dans le fil. Il revit si le lecteur l'ajoute à ses thèmes choisis, ou s'il interagit positivement avec un article de ce thème rencontré ailleurs que dans le fil (feed de repli, sauvegardés).
-- Un thème choisi ne descend jamais sous `W_FLOOR` : le lecteur l'a demandé explicitement.
-- La renormalisation à chaque étape dilue les gains anciens : les interactions récentes pèsent plus que les anciennes, et la réactivité reste la même quel que soit l'âge du compte.
-- Si le lecteur modifie ses thèmes (`PUT /v1/me/topics`), rien de spécial : le prochain calcul part des nouveaux thèmes choisis et rejoue tout l'historique.
+- An event whose article is unknown or has no main topic does not change the weights.
+- If the sum drops to 0, the weights start again from the starting weights.
+- Only a hide on an unchosen topic can bring a weight to 0, and it does so as soon as the weight is at most 0.15: that is the case of any unchosen topic the reader has not clearly liked before. An unchosen topic raised to 20 % by likes goes down to 5 % at the first hide, then to 0 at the second.
+- A topic at 0 gets no place in the feed any more. It comes back if the reader adds it to their chosen topics, or interacts positively with an article of that topic met elsewhere than in the feed (fallback feed, saved list).
+- A chosen topic never goes below `W_FLOOR`: the reader asked for it explicitly.
+- Renormalising at each step dilutes old gains: recent interactions weigh more than old ones, and the responsiveness stays the same whatever the age of the account.
+- If the reader changes their topics (`PUT /v1/me/topics`), nothing special: the next computation starts from the new chosen topics and replays the whole history.
 
-**Exemple chiffré** (K = 10, thèmes choisis : tech, économie, culture ; likes sans autre signal) :
+**Worked example** (K = 10, chosen topics: tech, economy, culture; likes without any other signal):
 
-| Étape | tech, éco, culture (chacun) | sport | politique | 5 autres (chacun) |
+| Step | tech, economy, culture (each) | sport | politics | 5 others (each) |
 | --- | --- | --- | --- | --- |
-| Départ | 30,0 % | 1,4 % | 1,4 % | 1,4 % |
-| Like sur un article de sport | 27,8 % | 8,7 % | 1,3 % | 1,3 % |
-| Like sur un autre article de sport | 25,7 % | 15,5 % | 1,2 % | 1,2 % |
-| Masquage d'un article de politique | 26,0 % | 15,7 % | 0 % | 1,2 % |
+| Start | 30.0 % | 1.4 % | 1.4 % | 1.4 % |
+| Like on a sport article | 27.8 % | 8.7 % | 1.3 % | 1.3 % |
+| Like on another sport article | 25.7 % | 15.5 % | 1.2 % | 1.2 % |
+| Hide on a politics article | 26.0 % | 15.7 % | 0 % | 1.2 % |
 
-Sur 10 cartes, cela donne en moyenne 7,8 cartes des thèmes choisis, 1,6 de sport, 0,6 d'exploration et aucune de politique.
+Over 10 cards, that gives on average 7.8 cards of the chosen topics, 1.6 of sport, 0.6 of exploration and none of politics.
 
-### 4.3 Articles aimés et rejetés
+### 4.3 Liked and rejected articles
 
-Après le rejeu :
+After the replay:
 
-- **aimés** : articles avec `v > 0`, de force `s = min(1, v / V_LIKE)` ;
-- **rejetés** : articles avec `v < 0`, de force `s = 1` si masqué, `S_SKIP` si seulement zappé.
+- **liked**: articles with `v > 0`, of strength `s = min(1, v / V_LIKE)`;
+- **rejected**: articles with `v < 0`, of strength `s = 1` if hidden, `S_SKIP` if only skipped.
 
-Chaque force est multipliée par un facteur d'ancienneté `0,5 ^ (âge_jours / HALF_LIFE_PROFILE_DAYS)`, où l'âge se compte depuis le dernier événement sur l'article. On garde au plus `PROFILE_MAX_ITEMS` articles par liste, les plus récents. Leurs embeddings sont lus dans `reco.article_embeddings` (8.4), y compris pour des articles sortis du catalogue ; un article sans embedding du modèle courant, ou disparu de `app.articles`, est écarté de la liste.
+Each strength is multiplied by an age factor `0.5 ^ (age_days / HALF_LIFE_PROFILE_DAYS)`, the age counted from the last event on the article. At most `PROFILE_MAX_ITEMS` articles are kept per list, the most recent. Their embeddings are read from `reco.article_embeddings` (8.4), including for articles that left the catalogue; an article without an embedding of the current model, or gone from `app.articles`, is dropped from the list.
 
-### 4.4 Thème en écho
+### 4.4 Echo topic
 
-Le **thème en écho** est le thème principal de l'article du plus récent événement `like`, `save`, `share` ou `read` complet, parmi les événements dont `received_at` est postérieur à la précédente requête de reco du même lecteur (`max(generated_at)` dans `reco.feed_requests`). S'il n'y a pas de tel événement, ou si son thème a un poids nul, il n'y a pas d'écho. Il sert en section 6 à placer ce thème en tête du lot. `unlike`, `unsave` et `hide` ne donnent jamais d'écho.
+The **echo topic** is the main topic of the article of the most recent `like`, `save`, `share` or complete `read` event, among the events whose `received_at` is later than the reader's previous recommendation request (`max(generated_at)` in `reco.feed_requests`). If there is no such event, or if its topic has a zero weight, there is no echo. Section 6 uses it to put that topic first in the batch. `unlike`, `unsave` and `hide` never give an echo.
 
-Un `read` est complet exactement quand le backend le juge fort (`StrongEventPolicy.java`) : `scrollDepth > 0,8`, ou `readMs`, tronqué à l'entier, au moins égal à 60 % de `word_count / 230 × 60 000` ms. Si `word_count` est nul ou inconnu, seule la première condition compte ; un `readMs` absent vaut 0. Le front web n'envoyant pas `scrollDepth`, c'est la seconde condition qui joue en pratique. La liste reprend ainsi exactement les événements forts positifs du backend, ceux qui déclenchent le recalcul du stock : chaque recalcul provoqué par un signal positif a donc son écho. C'est le seul usage de `scrollDepth` ; la valeur d'une lecture reste mesurée par le temps (4.1).
+A `read` is complete exactly when the backend judges it strong (`StrongEventPolicy.java`): `scrollDepth > 0.8`, or `readMs`, truncated to an integer, at least 60 % of `word_count / 230 × 60,000` ms. If `word_count` is zero or unknown, only the first condition counts; a missing `readMs` counts as 0. The web app does not send `scrollDepth`, so in practice the second condition applies. The list is thus exactly the backend's strong positive events, those that trigger the recomputation of the stock: every recomputation caused by a positive signal has its echo. This is the only use of `scrollDepth`; the value of a read is still measured by time (4.1).
 
-Exception : il n'y a pas d'écho si le stock gardé par le backend (la liste `exclude` de la requête, règle 3 du contrat) contient déjà un article de ce thème. Après plusieurs signaux forts d'affilée, chaque carte servie est la première d'un nouveau lot ; sans cette exception, le fil se réduirait au thème en écho.
+Exception: there is no echo if the stock the backend kept (the request's `exclude` list, rule 3 of the contract) already holds an article of that topic. After several strong signals in a row, every card served is the first of a new batch; without this exception the feed would shrink to the echo topic.
 
-L'éligibilité d'un événement compare son `received_at`, posé par le backend, au `generated_at` de la requête précédente, posé par la reco : un décalage d'horloge entre les deux peut faire perdre un écho.
+The eligibility of an event compares its `received_at`, set by the backend, with the `generated_at` of the previous request, set by the recommender: a clock offset between the two can lose an echo.
 
-## 5. Score d'un article
+## 5. Score of an article
 
-### 5.1 Ressemblance entre deux articles
+### 5.1 Similarity between two articles
 
-Les embeddings bruts de deux articles quelconques ont déjà un cosinus élevé. On recentre donc :
+The raw embeddings of any two articles already have a high cosine. They are therefore recentred:
 
 ```
-sim(a, b) = borne( (cos(a, b) − MU) / (1 − MU), 0, 1 )
+sim(a, b) = clamp( (cos(a, b) − MU) / (1 − MU), 0, 1 )
 ```
 
-`MU` est le cosinus moyen entre deux articles pris au hasard dans le catalogue. Il est recalculé à chaque rechargement du catalogue, sur 2 000 paires tirées avec une graine fixe (0). Si le catalogue compte moins de 50 articles, `MU = 0`.
+`MU` is the mean cosine between two articles drawn at random from the catalogue. It is recomputed at each reload of the catalogue, on 2,000 pairs drawn with a fixed seed (0). If the catalogue has fewer than 50 articles, `MU = 0`.
 
-### 5.2 Les trois termes
+### 5.2 The three terms
 
-Pour un candidat `a` :
+For a candidate `a`:
 
-- **Proximité** : on calcule `s_j × sim(a, j)` pour chaque article aimé `j` et on prend la moyenne des `min(3, nombre d'aimés)` plus grandes valeurs. Sans article aimé, la proximité vaut 0.
-- **Rejet** : le maximum de `s_j × sim(a, j)` sur les articles rejetés `j`. Sans article rejeté, 0.
-- **Fraîcheur** : `0,5 ^ (âge_heures / HALF_LIFE_FRESH_HOURS)`, l'âge étant compté depuis `published_at` et borné à 0 par le bas.
+- **Closeness**: compute `s_j × sim(a, j)` for each liked article `j` and take the mean of the `min(3, number of liked)` largest values. Without a liked article, closeness is 0.
+- **Rejection**: the maximum of `s_j × sim(a, j)` over the rejected articles `j`. Without a rejected article, 0.
+- **Freshness**: `0.5 ^ (age_hours / HALF_LIFE_FRESH_HOURS)`, the age counted from `published_at` and floored at 0.
 
-La proximité se calcule sur tous les articles aimés, tous thèmes confondus : aimer un article sur l'IA rapproche aussi un article d'économie qui parle d'IA.
+Closeness is computed over all liked articles, all topics together: liking an article about AI also brings closer an economy article about AI.
 
 ### 5.3 Score
 
 ```
-brut(a)  = W_AFF × proximité + W_FRESH × fraîcheur − W_NEG × rejet
-score(a) = borne( brut(a), 0, 1 )
+raw(a)   = W_AFF × closeness + W_FRESH × freshness − W_NEG × rejection
+score(a) = clamp( raw(a), 0, 1 )
 ```
 
-Le classement se fait sur `brut`, qui peut être négatif : le borner avant de classer mettrait à égalité tous les articles pénalisés. `score` est la valeur renvoyée dans la réponse et enregistrée.
+Ranking uses `raw`, which can be negative: clamping before ranking would tie all penalised articles. `score` is the value returned in the response and saved.
 
-Classement : `brut` décroissant, puis `published_at` décroissant, puis `id` croissant. Tant que le lecteur n'a rien aimé, la fraîcheur seule classe les articles.
+Ranking: `raw` descending, then `published_at` descending, then `id` ascending. As long as the reader has liked nothing, freshness alone ranks the articles.
 
-## 6. Répartition des places entre thèmes
+## 6. Allocation of the places between topics
 
-### 6.1 Parts
+### 6.1 Shares
 
-On part des poids `w`. Aucun thème ne dépasse `P_MAX` du lot : si un poids dépasse, on le ramène à `P_MAX` et on répartit l'excédent entre les autres thèmes au prorata de leurs poids, en répétant jusqu'à ce qu'aucun ne dépasse. Si tous les autres sont à 0, on ne plafonne pas. On note `p[t]` les parts obtenues. Le plafond ne modifie pas les poids, seulement la répartition.
+Start from the weights `w`. No topic exceeds `P_MAX` of the batch: if a weight exceeds it, bring it back to `P_MAX` and spread the excess over the other topics in proportion to their weights, repeating until none exceeds. If all the others are at 0, do not cap. `p[t]` are the resulting shares. The cap does not change the weights, only the allocation.
 
-### 6.2 Ordre des thèmes dans le lot
+### 6.2 Order of the topics in the batch
 
-Les proportions doivent tenir sur chaque page de 10 cartes, pas seulement sur le lot entier. On entrelace donc les thèmes ainsi :
+The proportions must hold on each page of 10 cards, not only on the whole batch. The topics are therefore interleaved this way:
 
-- chaque thème `t` de part non nulle reçoit un décalage `u[t]` tiré uniformément dans [0, 1) ; le thème en écho reçoit `u = 0` ;
-- la k-ième carte du thème `t` (k = 0, 1, 2…) a pour rang virtuel `τ(t, k) = (k + u[t]) / p[t]` ;
-- les places sont attribuées dans l'ordre croissant de `τ` ; à égalité, plus petit `topic_id` d'abord.
+- each topic `t` of non-zero share gets an offset `u[t]` drawn uniformly in [0, 1); the echo topic gets `u = 0`;
+- the k-th card of topic `t` (k = 0, 1, 2…) has the virtual rank `τ(t, k) = (k + u[t]) / p[t]`;
+- places are given in increasing order of `τ`; on a tie, lowest `topic_id` first.
 
-Le stock gardé par le backend (`exclude`, 4.4) sera servi juste avant le lot : ses cartes comptent comme déjà placées. Chaque thème commence donc à `k = nombre de cartes de ce thème dans le stock` au lieu de 0, et l'entrelacement se poursuit au lieu de repartir de zéro. Sans cette règle, après plusieurs signaux forts d'affilée, le lecteur ne verrait que des débuts de lots et une page pourrait compter 7 à 9 cartes d'un même thème. Seul l'ordre relatif des `τ` compte : rien d'autre ne change.
+The stock the backend kept (`exclude`, 4.4) will be served right before the batch: its cards count as already placed. Each topic therefore starts at `k = number of cards of that topic in the stock` instead of 0, and the interleaving goes on instead of starting over. Without this rule, after several strong signals in a row, the reader would only see beginnings of batches and a page could hold 7 to 9 cards of one topic. Only the relative order of the `τ` matters: nothing else changes.
 
-Un thème à 30 % revient ainsi toutes les 3 ou 4 cartes. Un thème à 1,4 % a 14 % de chances d'apparaître dans une page donnée. Le décalage aléatoire évite que les petits thèmes soient toujours relégués en fin de lot, là où le lot est le plus souvent jeté avant d'être servi.
+A topic at 30 % thus comes back every 3 or 4 cards. A topic at 1.4 % has a 14 % chance of appearing on a given page. The random offset keeps small topics from always being pushed to the end of the batch, where the batch is most often thrown away before being served.
 
-Les tirages se font avec `numpy.random.default_rng(graine)`, dans l'ordre croissant des `topic_id`. La graine est l'entier formé par les 8 premiers octets du SHA-256 du `requestId`, décalé d'un bit vers la droite pour tenir dans un `bigint` ; les tests peuvent l'imposer.
+The draws use `numpy.random.default_rng(seed)`, in increasing order of `topic_id`. The seed is the integer formed by the first 8 bytes of the SHA-256 of the `requestId`, shifted right by one bit to fit in a `bigint`; tests can impose it.
 
-## 7. Assemblage du lot
+## 7. Assembly of the batch
 
-### 7.1 Candidats
+### 7.1 Candidates
 
-Un article du catalogue est candidat s'il remplit toutes ces conditions :
+An article of the catalogue is a candidate if it meets all these conditions:
 
-- sa langue est celle du lecteur : les deux premières lettres de `context.locale`, ou à défaut de `app.users.locale` ;
-- il n'est pas dans `exclude` (requête) ;
-- il n'est pas dans l'ensemble Redis `seen:{userId}` ;
-- le lecteur n'a pas de ligne `app.user_articles` pour lui, et aucun événement rejoué ne porte sur lui.
+- its language is the reader's: the first two letters of `context.locale`, or failing that of `app.users.locale`;
+- it is not in `exclude` (request);
+- it is not in the Redis set `seen:{userId}`;
+- the reader has no `app.user_articles` row for it, and no replayed event is about it.
 
-Si la lecture de `seen:{userId}` échoue, le service continue avec les autres exclusions et journalise un avertissement.
+If reading `seen:{userId}` fails, the service goes on with the other exclusions and logs a warning.
 
-### 7.2 Remplissage
+### 7.2 Filling
 
-On parcourt les places dans l'ordre de la section 6.2. Pour une place du thème `t`, on prend le candidat de `t` le mieux classé qui respecte :
+The places are visited in the order of section 6.2. For a place of topic `t`, take the best-ranked candidate of `t` that respects:
 
-1. **pas la même actualité** qu'un article déjà placé dans le lot. Deux articles traitent la même actualité s'ils ont le même `cluster_id` non nul ou si `sim ≥ DUP_SIM`. Le backend n'a pas de colonne `cluster_id` : le service le laisse toujours nul, et seule la ressemblance compte. Le code garde la comparaison des `cluster_id`, qu'utilisent les tests et la simulation, pour le jour où l'ingestion en produira ;
-2. **sources variées** : parmi les 9 articles placés juste avant, au plus `SOURCE_MAX − 1` viennent de la même source (soit au plus `SOURCE_MAX` par fenêtre de 10).
+1. **not the same story** as an article already placed in the batch. Two articles cover the same story if they have the same non-null `cluster_id` or if `sim ≥ DUP_SIM`. The backend has no `cluster_id` column: the service always leaves it null, and similarity alone counts. The code keeps the `cluster_id` comparison, used by the tests and the simulation, for the day the ingestion produces some;
+2. **varied sources**: among the 9 articles placed just before, at most `SOURCE_MAX − 1` come from the same source (that is at most `SOURCE_MAX` per window of 10).
 
-Deux compléments à ces règles :
+Two additions to these rules:
 
-- **articles aimés ou rejetés** : un candidat qui traite la même actualité qu'un article aimé ou rejeté du profil (4.3) n'est jamais placé. Seul `sim ≥ DUP_SIM` est comparé ici, les `cluster_id` de ces articles n'étant pas chargés. Sans cela, juste après un like, la proximité placerait en tête la même actualité reprise par un autre média ;
-- **stock gardé** : les cartes de `exclude`, dans l'ordre de la requête, comptent comme placées avant la position 0. Elles marquent leurs mêmes actualités avant le remplissage (règle 1), et la fenêtre des 9 articles précédents commence remplie des sources des 9 dernières cartes du stock (règle 2). Le lecteur les voit juste avant le lot : sans cela, les deux règles ne vaudraient qu'à l'intérieur du lot, pas dans le fil réellement servi.
+- **liked or rejected articles**: a candidate that covers the same story as a liked or rejected article of the profile (4.3) is never placed. Only `sim ≥ DUP_SIM` is compared here, the `cluster_id` of these articles not being loaded. Without it, right after a like, closeness would put first the same story told by another outlet;
+- **kept stock**: the cards of `exclude`, in the request's order, count as placed before position 0. They mark their stories before the filling (rule 1), and the window of the 9 previous articles starts filled with the sources of the stock's last 9 cards (rule 2). The reader sees them just before the batch: without this, both rules would only hold inside the batch, not in the feed actually served.
 
-Si aucun candidat de `t` ne respecte les deux règles, on prend le mieux classé qui respecte la règle 1 seule (et on le note `relaxedSource`). S'il n'y en a pas non plus, le thème est épuisé : cette place et les suivantes du thème sont sautées, ce qui redistribue ses places aux autres au prorata.
+If no candidate of `t` respects both rules, take the best-ranked one that respects rule 1 alone (and mark it `relaxedSource`). If there is none either, the topic is exhausted: this place and the topic's next ones are skipped, which spreads its places over the others in proportion.
 
-On s'arrête quand le lot contient `count` articles ou que tous les thèmes sont épuisés. Le lot peut donc être plus court que demandé, ce que le contrat prévoit.
+Stop when the batch holds `count` articles or all topics are exhausted. The batch can therefore be shorter than asked for, which the contract allows.
 
-### 7.3 Champ `reason`
+### 7.3 The `reason` field
 
-| Valeur | Condition |
+| Value | Condition |
 | --- | --- |
-| `similar` | proximité ≥ `AFF_REASON_MIN` |
-| `onboarding` | sinon, et le thème principal est un thème choisi |
-| `explore` | sinon |
+| `similar` | closeness ≥ `AFF_REASON_MIN` |
+| `onboarding` | otherwise, and the main topic is a chosen topic |
+| `explore` | otherwise |
 
-`collaborative` et `trending` ne sont jamais émis en v1.
+`collaborative` and `trending` are never sent in v1.
 
 ## 8. Service
 
-### 8.1 Forme générale
+### 8.1 General shape
 
-Python 3.12, FastAPI, psycopg 3, redis-py, numpy, sentence-transformers. Deux processus issus du même paquet :
+Python 3.12, FastAPI, psycopg 3, redis-py, numpy, sentence-transformers. Two processes from the same package:
 
-- **api** : sert `POST /v1/recommendations` et les routes d'explication ; garde le catalogue en mémoire ;
-- **worker** : encode les nouveaux articles, écrit les listes de repli, purge, et tient à jour les profils à partir du flux `events` (8.6).
+- **api**: serves `POST /v1/recommendations` and the explanation routes; keeps the catalogue in memory;
+- **worker**: encodes new articles, writes the fallback lists, purges, and keeps the profiles up to date from the `events` stream (8.6).
 
-Le calcul (profil, score, répartition, assemblage) est écrit en fonctions pures, sans accès à la base, à Redis ni à l'horloge : ces dépendances sont passées en argument. C'est ce qui rend les tests de la section 11 possibles sans infrastructure.
+The computation (profile, score, allocation, assembly) is written as pure functions, without access to the database, Redis or the clock: these dependencies are passed as arguments. This is what makes the tests of section 11 possible without infrastructure.
 
-### 8.2 Catalogue en mémoire
+### 8.2 In-memory catalogue
 
-Le processus api charge les articles qui vérifient : embedding du modèle courant présent dans `reco.article_embeddings`, `published_at` dans les `MAX_AGE_DAYS` derniers jours, source active, thème principal présent. Pour chacun : id, source, langue, `published_at`, thème principal, embedding (`cluster_id` est nul, 7.2). Rechargement complet toutes les `CATALOG_REFRESH_S` secondes en arrière-plan, avec remplacement atomique.
+The api process loads the articles that meet: an embedding of the current model in `reco.article_embeddings`, `published_at` within the last `MAX_AGE_DAYS` days, an active source, a main topic. For each: id, source, language, `published_at`, main topic, embedding (`cluster_id` is null, 7.2). Full reload every `CATALOG_REFRESH_S` seconds in the background, with atomic replacement.
 
-À cette échelle (quelques milliers d'articles), les ressemblances se calculent de façon exacte par produit matriciel numpy. L'index HNSW de pgvector n'est pas utilisé par la reco.
+At this scale (a few thousand articles), similarities are computed exactly with a numpy matrix product. The recommender does not use pgvector's HNSW index.
 
-Si le catalogue est vide, le service répond 200 avec `items: []` et le backend sert le repli.
+If the catalogue is empty, the service answers 200 with `items: []` and the backend serves the fallback feed.
 
 ### 8.3 `POST /v1/recommendations`
 
-Format de requête et de réponse : ceux du contrat, sans changement.
+Request and response formats: those of the contract, unchanged.
 
-- `requestId` : `r_` suivi d'un UUID v4 en hexadécimal.
-- `modelVersion` : `topic-weights-v1`.
-- `items` : dans l'ordre d'affichage (celui de l'assemblage), pas par score.
-- 400 si la requête est invalide ; 404 si `userId` n'existe pas dans `app.users` ; 503 si la base est injoignable.
+- `requestId`: `r_` followed by a UUID v4 in hexadecimal.
+- `modelVersion`: `topic-weights-v1`.
+- `items`: in display order (the assembly's), not by score.
+- 400 if the request is invalid; 404 if `userId` does not exist in `app.users`; 503 if the database is unreachable.
 
-Un nouvel inscrit qui a des thèmes reçoit donc un vrai lot dès son premier appel, construit sur ses poids de départ. Le 404 ne concerne plus que les utilisateurs inexistants.
+A new reader who has topics therefore gets a real batch from their first call, built on their starting weights. The 404 only concerns users that do not exist.
 
-Objectif de latence : 95 % des réponses complètes (lecture des événements, calcul, enregistrement du lot) en moins de 150 ms avec 5 000 articles au catalogue et 300 événements pour le lecteur ; le backend coupe à 300 ms. Le calcul seul doit tenir en 80 ms (test A13). Si l'enregistrement du lot fait dépasser l'objectif, il passe en tâche de fond après l'envoi de la réponse.
+Latency target: 95 % of complete responses (reading the events, computing, saving the batch) under 150 ms with 5,000 articles in the catalogue and 300 events for the reader; the backend gives up at 300 ms. The computation alone must take under 80 ms (test A13). If saving the batch makes the target slip, it moves to a background task after the response is sent.
 
-### 8.4 Encodage des articles (worker)
+### 8.4 Encoding of the articles (worker)
 
-Toutes les `ENCODE_INTERVAL_S` secondes, le worker prend jusqu'à 64 articles de `app.articles` qui n'ont pas de ligne du modèle courant dans `reco.article_embeddings` (pas de ligne, ou une ligne d'un autre modèle), les plus récemment ingérés d'abord.
+Every `ENCODE_INTERVAL_S` seconds, the worker takes up to 64 articles of `app.articles` that have no row of the current model in `reco.article_embeddings` (no row, or a row of another model), the most recently ingested first.
 
-- Modèle : `intfloat/multilingual-e5-small` (384 dimensions), sur CPU.
-- Texte encodé : `query: {titre}. {résumé}`, balises HTML retirées du résumé, tronqué à 512 tokens.
-- Vecteur normalisé à 1, écrit dans `reco.article_embeddings` (une ligne par article, remplacée si elle existe) avec `model = 'multilingual-e5-small'` et `embedded_at`.
+- Model: `intfloat/multilingual-e5-small` (384 dimensions), on CPU.
+- Encoded text: `query: {title}. {summary}`, HTML tags removed from the summary, truncated to 512 tokens.
+- Vector normalised to 1, written to `reco.article_embeddings` (one row per article, replaced if it exists) with `model = 'multilingual-e5-small'` and `embedded_at`.
 
-La reco n'écrit rien dans `app` : le rôle `swipread_reco` du backend n'y a que `SELECT` (section 13). La colonne `app.articles.embedding` du backend n'est ni lue ni écrite par la reco. Un article devient recommandable au plus `ENCODE_INTERVAL_S + CATALOG_REFRESH_S` secondes après son ingestion, hors temps d'encodage.
+The recommender writes nothing to `app`: the backend's `swipread_reco` role only has `SELECT` there (section 13). The backend's `app.articles.embedding` column is neither read nor written by the recommender. An article becomes recommendable at most `ENCODE_INTERVAL_S + CATALOG_REFRESH_S` seconds after its ingestion, encoding time aside.
 
-### 8.5 Listes de repli (worker)
+### 8.5 Fallback lists (worker)
 
-Toutes les 10 minutes, pour chaque thème : les 50 articles de sources actives les plus récents (`published_at` décroissant) dont c'est le thème principal, publiés dans les `MAX_AGE_DAYS` derniers jours, écrits dans la liste Redis `fallback:{slug}` avec un TTL de 1 heure. Le remplacement est atomique (écriture dans une clé temporaire puis `RENAME`).
+Every 10 minutes, for each topic: the 50 most recent articles of active sources (`published_at` descending) whose main topic it is, published within the last `MAX_AGE_DAYS` days, written to the Redis list `fallback:{slug}` with a TTL of 1 hour. The replacement is atomic (written to a temporary key, then `RENAME`).
 
-### 8.6 Flux `events` et profils enregistrés
+### 8.6 The `events` stream and stored profiles
 
-Contrat v1.5. Le worker lit le flux Redis `events` dans le groupe de consommateurs `reco`, sous un nom stable (`RECO_STREAM_CONSUMER`, `worker` par défaut), par lots de 100, en attendant au plus 2 secondes entre deux activités. Le groupe est créé au début du flux s'il n'existe pas : le premier lancement traite les messages encore gardés (7 jours).
+Contract v1.5. The worker reads the Redis stream `events` in the consumer group `reco`, under a stable name (`RECO_STREAM_CONSUMER`, `worker` by default), in batches of 100, waiting at most 2 seconds between two activities. The group is created at the start of the stream if it does not exist: the first run handles the messages still kept (7 days).
 
-- **Événement d'un lecteur** (types lus par le profil, 4.1) : son profil est recalculé une fois par lot depuis `app.events`, et non depuis le message, puis enregistré dans `reco.user_profiles` avec son repère. Rejouer depuis la source de vérité rend le traitement idempotent et insensible à l'ordre d'arrivée : un message reçu deux fois ou en retard donne le même profil. `impression` et les types inconnus sont acquittés sans travail, un message illisible est journalisé et acquitté.
-- **`user_deleted`** : le profil et les lots du lecteur (`reco.feed_requests`, et `reco.feed_items` par cascade) sont supprimés tout de suite. Un lecteur absent de `app.users` n'a pas non plus de profil enregistré.
-- **Acquittement** : un profil dont le recalcul échoue est acquitté quand même, la demande suivante le recalculera. Une suppression qui échoue reste en attente et est reprise toutes les minutes (`XREADGROUP` depuis `0`), comme les messages lus avant un arrêt brutal ; la purge horaire (8.7) efface les mêmes données en filet de sécurité.
+- **A reader's event** (types read by the profile, 4.1): their profile is recomputed once per batch from `app.events`, not from the message, then stored in `reco.user_profiles` with its mark. Replaying from the source of truth makes the handling idempotent and insensitive to the order of arrival: a message received twice or late gives the same profile. `impression` and unknown types are acknowledged without work; an unreadable message is logged and acknowledged.
+- **`user_deleted`**: the reader's profile and batches (`reco.feed_requests`, and `reco.feed_items` by cascade) are deleted at once. A reader absent from `app.users` has no stored profile either.
+- **Acknowledgement**: a profile whose recomputation fails is acknowledged anyway, the next request will recompute it. A deletion that fails stays pending and is taken again every minute (`XREADGROUP` from `0`), like the messages read before a crash; the hourly purge (8.7) erases the same data as a safety net.
 
-Ce qui est enregistré (`reco.user_profiles`, [database.md](database.md)) : le résultat du rejeu (4.2, 4.3), c'est-à-dire les poids, les articles aimés et rejetés avec leur force avant le facteur d'ancienneté, les articles touchés et les 50 derniers changements de poids. Le facteur d'ancienneté (4.3) et le thème en écho (4.4) dépendent de l'heure et de la requête précédente : ils sont calculés à chaque demande, l'écho sur les seuls événements reçus depuis la requête précédente.
+What is stored (`reco.user_profiles`, [database.md](database.md)): the result of the replay (4.2, 4.3), that is the weights, the liked and rejected articles with their strength before the age factor, the touched articles and the last 50 weight changes. The age factor (4.3) and the echo topic (4.4) depend on the time and on the previous request: they are computed at each request, the echo on the events received since the previous request only.
 
-**À chaque demande** (`POST /v1/recommendations`, `GET /v1/explain/users/{userId}`), le profil enregistré n'est utilisé que si :
+**At each request** (`POST /v1/recommendations`, `GET /v1/explain/users/{userId}`), the stored profile is used only if:
 
-- son repère est celui des événements du lecteur dans `app.events` (types du profil, avec article) : nombre d'événements, et dernier événement (`occurred_at`, `event_id`) comme le demande le contrat. Le nombre attrape aussi un événement validé en retard avec un `occurred_at` plus ancien que le repère ;
-- sa base est la même : version du modèle, paramètres (section 10), liste des thèmes et thèmes choisis. Un changement de thèmes (`PUT /v1/me/topics`) ne publie pas de message : il est vu ici.
+- its mark is that of the reader's events in `app.events` (profile types, with an article): number of events, and last event (`occurred_at`, `event_id`) as the contract asks. The number also catches an event committed late with an `occurred_at` older than the mark;
+- its basis is the same: model version, parameters (section 10), list of topics and chosen topics. A change of topics (`PUT /v1/me/topics`) publishes no message: it is seen here.
 
-Sinon le profil est rejoué depuis `app.events` (repère et événements lus dans un même instantané) et enregistré. C'est ce qui couvre le cas que la v1 craignait : le backend demande un lot juste après un événement fort, souvent avant que le worker ait lu son message ; la demande voit le repère dépassé et rejoue. Les messages perdus (flux tronqué à 7 jours, Redis vidé) sont couverts de la même façon.
+Otherwise the profile is replayed from `app.events` (mark and events read in one snapshot) and stored. This covers the case v1 feared: the backend asks for a batch right after a strong event, often before the worker has read its message; the request sees the mark is behind and replays. Lost messages (stream trimmed at 7 days, Redis emptied) are covered the same way.
 
 ### 8.7 Purge (worker)
 
-Toutes les heures : suppression des lignes de `reco.feed_requests` de plus de 30 jours, et de celles dont le `user_id` n'existe plus dans `app.users`. Les `feed_items` suivent par cascade. Les profils (`reco.user_profiles`) des lecteurs absents de `app.users` sont supprimés au même passage, en filet de sécurité derrière `user_deleted` (8.6). Les lignes de `reco.article_embeddings` dont l'article n'existe plus dans `app.articles` sont supprimées au même passage. La reco ne stocke aucune autre donnée personnelle.
+Every hour: deletion of the `reco.feed_requests` rows older than 30 days, and of those whose `user_id` no longer exists in `app.users`. The `feed_items` follow by cascade. The profiles (`reco.user_profiles`) of readers absent from `app.users` are deleted in the same pass, as a safety net behind `user_deleted` (8.6). The `reco.article_embeddings` rows whose article no longer exists in `app.articles` are deleted in the same pass. The recommender keeps no other personal data.
 
-## 9. Explication et traçabilité
+## 9. Explanation and traceability
 
 ### 9.1 Tables
 
-Le service crée au démarrage ses quatre tables, `reco.feed_requests`, `reco.feed_items`, `reco.article_embeddings` (8.4) et `reco.user_profiles` (8.6), si elles n'existent pas. Le schéma `reco` et l'extension `vector` viennent des migrations du backend : le rôle de la reco ne peut pas créer de schéma, et le service s'arrête avec un message explicite s'ils manquent, ou si `reco.user_profiles` est encore l'ancienne table du backend (créée par sa migration V1, supprimée par V8). Leur définition est dans [database.md](database.md). Contenu des colonnes `jsonb` :
+At start, the service creates its four tables, `reco.feed_requests`, `reco.feed_items`, `reco.article_embeddings` (8.4) and `reco.user_profiles` (8.6), if they do not exist. The `reco` schema and the `vector` extension come from the backend's migrations: the recommender's role cannot create a schema, and the service stops with an explicit message if they are missing, or if `reco.user_profiles` is still the backend's old table (created by its migration V1, dropped by V8). Their definition is in [database.md](database.md). Content of the `jsonb` columns:
 
-- `profile` : `{ "weights": {slug: poids}, "shares": {slug: part après plafond}, "likedCount": n, "rejectedCount": n, "echoTopic": slug ou null, "mu": valeur }`.
-- `params` : les paramètres de la section 10 tels qu'utilisés pour ce lot.
-- `explanation` : `{ "affinity": x, "freshness": x, "penalty": x, "topicWeight": x, "nearestLiked": [{ "articleId": …, "sim": x }] (3 au plus), "nearestRejected": { "articleId": …, "sim": x } ou null, "relaxedSource": bool }`.
+- `profile`: `{ "weights": {slug: weight}, "shares": {slug: share after the cap}, "likedCount": n, "rejectedCount": n, "echoTopic": slug or null, "mu": value }`.
+- `params`: the parameters of section 10 as used for this batch.
+- `explanation`: `{ "affinity": x, "freshness": x, "penalty": x, "topicWeight": x, "nearestLiked": [{ "articleId": …, "sim": x }] (3 at most), "nearestRejected": { "articleId": …, "sim": x } or null, "relaxedSource": bool }`.
 
-### 9.2 Routes de lecture
+### 9.2 Read routes
 
-Sur le service de reco, en JSON, sans authentification : le service n'est joignable que depuis le réseau interne.
+On the recommendation service, in JSON, without authentication: the service is only reachable from the internal network.
 
-| Route | Contenu |
+| Route | Content |
 | --- | --- |
-| `GET /v1/explain/users/{userId}` | Thèmes (id, slug, libellé, choisi ou non, poids, part), articles aimés et rejetés avec leur force, et les 50 derniers événements ayant changé un poids : type, article, thème, δ, poids du thème après. |
-| `GET /v1/explain/requests/{requestId}` | La ligne `feed_requests` et ses `feed_items`, avec le titre de chaque article. |
-| `GET /healthz` | État du service, taille et âge du catalogue. |
+| `GET /v1/explain/users/{userId}` | Topics (id, slug, label, chosen or not, weight, share), liked and rejected articles with their strength, and the last 50 events that changed a weight: type, article, topic, δ, weight of the topic after. |
+| `GET /v1/explain/requests/{requestId}` | The `feed_requests` row and its `feed_items`, with the title of each article. |
+| `GET /healthz` | Status of the service, size and age of the catalogue. |
 
-## 10. Paramètres
+## 10. Parameters
 
-Tous dans un seul module de configuration, surchargeable par variables d'environnement.
+All in a single configuration module (`params.py`), overridable by environment variables (`RECO_<NAME>`).
 
-| Nom | Valeur | Rôle |
+| Name | Value | Role |
 | --- | --- | --- |
-| `EPSILON` | 0,10 | Part totale des thèmes non choisis au départ |
-| `W_FLOOR` | 0,01 | Plancher d'un poids, hors masquage d'un thème non choisi |
-| `P_MAX` | 0,60 | Part maximale d'un thème dans un lot |
-| `T_SKIP` | 1 500 ms | En dessous, la carte est zappée |
-| `T_LONG` | 6 000 ms | Au-dessus, vue longue |
-| `V_SKIP` | −0,02 | Valeur d'un article zappé |
-| `V_LONG_VIEW` | 0,02 | Vue longue |
-| `V_OPEN` | 0,03 | Ouverture |
-| `V_READ_BONUS` | 0,04 | Ajouté à `V_OPEN`, au prorata de la lecture |
-| `V_LIKE` | 0,08 | Like, sauvegarde ou partage |
-| `V_HIDE` | −0,15 | Masquage |
-| `S_SKIP` | 0,15 | Force d'un article zappé dans la liste des rejetés |
-| `HALF_LIFE_PROFILE_DAYS` | 30 | Demi-vie des articles aimés et rejetés |
-| `PROFILE_MAX_ITEMS` | 100 | Taille maximale de chaque liste |
-| `EVENTS_MAX` | 5 000 | Événements rejoués au plus |
-| `W_AFF` | 0,6 | Poids de la proximité dans le score |
-| `W_FRESH` | 0,4 | Poids de la fraîcheur |
-| `W_NEG` | 0,5 | Poids du rejet |
-| `HALF_LIFE_FRESH_HOURS` | 48 | Demi-vie de la fraîcheur |
-| `MAX_AGE_DAYS` | 14 | Âge maximal d'un article recommandable |
-| `DUP_SIM` | 0,80 | Seuil de « même actualité » |
-| `SOURCE_MAX` | 2 | Articles d'une même source par fenêtre de 10 |
-| `AFF_REASON_MIN` | 0,20 | Proximité minimale pour `reason = similar` |
-| `CATALOG_REFRESH_S` | 60 | Période de rechargement du catalogue |
-| `ENCODE_INTERVAL_S` | 15 | Période de l'encodage |
+| `EPSILON` | 0.10 | Total share of the unchosen topics at start |
+| `W_FLOOR` | 0.01 | Floor of a weight, except a hide on an unchosen topic |
+| `P_MAX` | 0.60 | Largest share of a topic in a batch |
+| `T_SKIP` | 1,500 ms | Below it, the card is skipped |
+| `T_LONG` | 6,000 ms | Above it, a long view |
+| `V_SKIP` | −0.02 | Value of a skipped article |
+| `V_LONG_VIEW` | 0.02 | Long view |
+| `V_OPEN` | 0.03 | Open |
+| `V_READ_BONUS` | 0.04 | Added to `V_OPEN`, in proportion to the read |
+| `V_LIKE` | 0.08 | Like, save or share |
+| `V_HIDE` | −0.15 | Hide |
+| `S_SKIP` | 0.15 | Strength of a skipped article in the rejected list |
+| `HALF_LIFE_PROFILE_DAYS` | 30 | Half-life of the liked and rejected articles |
+| `PROFILE_MAX_ITEMS` | 100 | Largest size of each list |
+| `EVENTS_MAX` | 5,000 | Most events replayed |
+| `W_AFF` | 0.6 | Weight of closeness in the score |
+| `W_FRESH` | 0.4 | Weight of freshness |
+| `W_NEG` | 0.5 | Weight of rejection |
+| `HALF_LIFE_FRESH_HOURS` | 48 | Half-life of freshness |
+| `MAX_AGE_DAYS` | 14 | Largest age of a recommendable article |
+| `DUP_SIM` | 0.80 | "Same story" threshold |
+| `SOURCE_MAX` | 2 | Articles of one source per window of 10 |
+| `AFF_REASON_MIN` | 0.20 | Smallest closeness for `reason = similar` |
+| `CATALOG_REFRESH_S` | 60 | Reload period of the catalogue |
+| `ENCODE_INTERVAL_S` | 15 | Encoding period |
 
-`DUP_SIM` et `AFF_REASON_MIN` dépendent du modèle d'embedding : ils sont à vérifier sur de vrais articles une fois l'ingestion en place (une vingtaine de paires jugées à la main suffit).
+`DUP_SIM` and `AFF_REASON_MIN` depend on the embedding model: they are to be checked on real articles now that the ingestion is in place (about twenty pairs judged by hand are enough).
 
-## 11. Évaluation avec des lecteurs simulés
+## 11. Evaluation with simulated readers
 
-### 11.1 Catalogue synthétique
+### 11.1 Synthetic catalogue
 
-Pour tester sans modèle ni base : 10 thèmes, 3 sous-thèmes par thème, 8 sources. Chaque thème a un centre tiré au hasard sur la sphère unité en dimension 384 ; chaque sous-thème est `normaliser(centre du thème + 0,6 × bruit)` ; chaque article est `normaliser(centre du sous-thème + 0,7 × bruit)`, le bruit étant un vecteur gaussien de norme 1. Avec ces valeurs, deux articles d'un même sous-thème se ressemblent à environ 0,65 : assez pour être rapprochés, pas assez pour passer pour la même actualité. 60 articles par sous-thème, sources attribuées à tour de rôle, graine fixe.
+To test without a model or a database: 10 topics, 3 subtopics per topic, 8 sources. Each topic has a centre drawn at random on the unit sphere in dimension 384; each subtopic is `normalise(topic centre + 0.6 × noise)`; each article is `normalise(subtopic centre + 0.7 × noise)`, the noise being a Gaussian vector of norm 1. With these values, two articles of the same subtopic have a similarity of about 0.65: enough to be brought together, not enough to pass for the same story. 60 articles per subtopic, sources given in turn, fixed seed.
 
-### 11.2 Tests d'acceptation
+### 11.2 Acceptance tests
 
-Tous déterministes (graine et horloge imposées). Les bornes de A1, A2 et A4 valent pour la graine imposée par les tests : d'une graine à l'autre, les décalages aléatoires de 6.2 font varier le nombre de cartes d'un thème d'environ 2 cartes en plus ou en moins autour de sa part. Sauf mention contraire, les articles ont tous le même âge (24 h), et le lecteur a choisi 3 thèmes sur 10.
+All deterministic (seed and clock imposed). The bounds of A1, A2 and A4 hold for the seed the tests impose: from one seed to another, the random offsets of 6.2 move the number of cards of a topic by about 2 cards either way around its share. Unless stated otherwise, the articles all have the same age (24 h), and the reader chose 3 topics out of 10.
 
-| # | Scénario | Attendu |
+| # | Scenario | Expected |
 | --- | --- | --- |
-| A1 | Nouveau lecteur, lot de 50 | Entre 40 et 48 cartes des thèmes choisis ; chaque thème choisi a entre 13 et 17 cartes |
-| A2 | Deux likes sur deux articles d'un thème non choisi X, puis masquage d'un article d'un thème non choisi Y ; lot de 50 | Poids égaux à ceux de l'exemple 4.2 à 0,001 près ; position 0 du lot dans le thème X ; aucune carte de Y ; au moins 6 des 10 premières dans les thèmes choisis |
-| A3 | Cinq likes sur cinq articles d'un thème non choisi | Poids du thème ≥ 0,30 |
-| A4 | Vingt likes sur un même thème, lot de 50 | Part calculée du thème égale à `P_MAX` ; au plus 31 cartes du thème dans le lot avec la graine imposée (30 attendues) ; au moins 3 thèmes présents |
-| A5 | Trois likes sur le sous-thème S d'un thème choisi T | Parmi les cartes de T du lot suivant, au moins 70 % sont de S |
-| A6 | Masquage d'un article du sous-thème S d'un thème choisi T | Le poids de T baisse et reste ≥ `W_FLOOR` ; parmi les cartes de T du lot suivant, au plus 15 % sont de S |
-| A7 | Vue longue, ouverture, lecture complète puis like sur un même article | Gain total du thème avant renormalisation égal à `V_LIKE`, pas à la somme |
-| A8 | Like puis `unlike` sur un article sans autre signal | Valeur de l'article revenue à 0 |
-| A9 | Vingt lots successifs, chaque lot ajouté à `seen` | Aucun article deux fois ; aucun article de `exclude` renvoyé |
-| A10 | Lot de 50 | Aucune paire « même actualité » ; au plus 2 articles par source dans toute fenêtre de 10 |
-| A11 | Même état, même graine, même horloge, deux appels | Lots identiques |
-| A12 | Articles d'âges variés, lecteur sans interaction | Dans chaque thème, ordre de sortie du plus récent au plus ancien |
-| A13 | 5 000 articles, 300 événements, 200 appels du calcul pur (sans base ni Redis) | 95 % en moins de 80 ms (test de performance, lancé à part) |
+| A1 | New reader, batch of 50 | Between 40 and 48 cards of the chosen topics; each chosen topic has between 13 and 17 cards |
+| A2 | Two likes on two articles of an unchosen topic X, then a hide on an article of an unchosen topic Y; batch of 50 | Weights equal to those of the example in 4.2 within 0.001; position 0 of the batch in topic X; no card of Y; at least 6 of the first 10 in the chosen topics |
+| A3 | Five likes on five articles of an unchosen topic | Weight of the topic ≥ 0.30 |
+| A4 | Twenty likes on one topic, batch of 50 | Computed share of the topic equal to `P_MAX`; at most 31 cards of the topic in the batch with the imposed seed (30 expected); at least 3 topics present |
+| A5 | Three likes on subtopic S of a chosen topic T | Among the cards of T in the next batch, at least 70 % are of S |
+| A6 | Hide on an article of subtopic S of a chosen topic T | The weight of T goes down and stays ≥ `W_FLOOR`; among the cards of T in the next batch, at most 15 % are of S |
+| A7 | Long view, open, complete read then like on one article | Total gain of the topic before renormalisation equal to `V_LIKE`, not the sum |
+| A8 | Like then `unlike` on an article without any other signal | Value of the article back to 0 |
+| A9 | Twenty successive batches, each added to `seen` | No article twice; no article of `exclude` returned |
+| A10 | Batch of 50 | No "same story" pair; at most 2 articles per source in any window of 10 |
+| A11 | Same state, same seed, same clock, two calls | Identical batches |
+| A12 | Articles of various ages, reader without interaction | Within each topic, output from the most recent to the oldest |
+| A13 | 5,000 articles, 300 events, 200 calls of the pure computation (no database nor Redis) | 95 % under 80 ms (performance test, run apart) |
 
-### 11.3 Rapport pour le jury
+### 11.3 Report for the jury
 
-Un script joue 4 lecteurs types sur 100 cartes chacun, en imitant le backend (pages de 10, règle n+10 du stock décidée avec le backend ; le backend actuel s'en écarte, section 13), et produit un tableau par lecteur et par page de 10 :
+A script plays 4 typical readers over 100 cards each, imitating the backend (pages of 10, the n+10 stock rule decided with the backend; the current backend differs, section 13), and produces a table per reader and per page of 10:
 
-- part de cartes pertinentes (dans les goûts déclarés du lecteur simulé) ;
-- part du thème préféré ;
-- part d'exploration (`reason = explore`) ;
-- nombre de thèmes et de sources distincts.
+- share of relevant cards (within the simulated reader's stated tastes);
+- share of the favourite topic;
+- share of exploration (`reason = explore`);
+- number of distinct topics and sources.
 
-Lecteurs types : fidèle à ses thèmes choisis ; passionné d'un thème non choisi ; allergique à un thème choisi ; lecteur qui zappe tout. Chaque lecteur suit une règle fixe (aime tel sous-thème, masque tel thème, zappe le reste). Sortie en Markdown et CSV.
+Typical readers: faithful to their chosen topics; passionate about an unchosen topic; allergic to a chosen topic; a reader who skips everything. Each reader follows a fixed rule (likes such subtopic, hides such topic, skips the rest). Output in Markdown and CSV.
 
-## 12. Ce qui est laissé à l'équipe qui code
+## 12. What is left to the coding team
 
-- L'organisation des modules, tant que le cœur reste en fonctions pures (8.1).
-- Les requêtes SQL et la façon de charger le catalogue.
-- Le format des journaux, l'empaquetage, la conteneurisation.
-- Les tests unitaires au-delà de ceux de la section 11.
+- The organisation of the modules, as long as the core stays in pure functions (8.1).
+- The SQL queries and how the catalogue is loaded.
+- The log format, packaging, containerisation.
+- Unit tests beyond those of section 11.
 
-## 13. État du backend (Swipread/api, commit 7549cf5 ; flux, ingestion et schéma au commit 48055c3)
+## 13. State of the backend (Swipread/api, commit 7549cf5; stream, ingestion and schema at commit 48055c3)
 
-Ce que le backend fait réellement sur chaque point dont la reco dépend, lu dans son code. Les chemins sont relatifs au dépôt Swipread/api. Le backend fait référence : là où il s'écarte de ce qui avait été décidé, la reco s'adapte ou l'écart est signalé.
+What the backend really does on each point the recommender depends on, read in its code. Paths are relative to the Swipread/api repository. The backend is the reference: where it differs from what had been decided, the recommender adapts or the gap is reported.
 
-| Point | Ce que fait le backend | Pour la reco |
+| Point | What the backend does | For the recommender |
 | --- | --- | --- |
-| Stock gardé sur un événement fort | Événements forts : `like`, `save`, `share`, `hide`, et `read` complet (4.4) (`event/StrongEventPolicy.java`). Sur l'un d'eux, `FeedRefiller.invalidate` appelle `FeedStore.trim(userId, pageSize)` : il garde les 10 premiers articles du stock, **quelle que soit la position** de la carte, puis relance un remplissage. Un `hide` retire en plus l'article du stock. | **Écart avec la règle n+10** décidée (section 15, règle 4 du stock du contrat), qui gardait les `p` premiers articles. Avec les cartes encore sur le téléphone (9 − p) et les 10 gardées, une interaction sur la carte n se voit entre la carte n+11 (dernière carte de la page) et n+20 (première carte de la page), pas à n+10. La simulation de la section 11.3 imite toujours la règle n+10. |
-| Remplissage après validation | `EventService.ingest` enregistre les événements dans une transaction, puis seulement invalide le stock. Le remplissage tourne en tâche de fond, sous le verrou `feed:{userId}:lock` (5 s) ; un lot calculé pendant qu'une nouvelle invalidation change `feed:{userId}:ver` est écarté et recalculé une fois. | Conforme : le profil rejoué contient l'événement, l'écho n'est pas perdu. |
-| `exclude` | `FeedRefiller.refill` envoie le stock actuel (`LRANGE feed:{userId} 0 -1`), dans l'ordre, et `count = 50 − taille du stock`. | Conforme : les cartes de `exclude` comptent comme placées avant le lot (7.2) et suppriment l'écho (4.4). |
-| `seen:{userId}` | Ensemble Redis des articles servis, complété à chaque page (`FeedStore.markSeen`, TTL 30 jours). Le backend filtre aussi les articles du lot déjà dans `seen`. | Conforme : la reco le lit en lecture seule (7.1). |
-| `fallback:{slug}` | `FallbackFeedProvider` lit les listes `fallback:{slug}` des thèmes du lecteur, mélangées, puis complète par les articles les plus récents de la base. Il ne les écrit jamais. | Conforme : le worker les écrit, indexées par slug (8.5). |
-| Droits de la reco en base | Migration `V5__reco_role.sql` : rôle de groupe `swipread_reco`, sans connexion. `SELECT` sur `app` (sur `app.users`, seulement `id`, `locale`, `created_at` ; rien sur `app.event_outbox` ni `app.refresh_tokens`), `USAGE` et `CREATE` sur le schéma `reco`, lecture et écriture sur ses tables. Aucun `UPDATE` sur `app`, pas de `CREATE` sur la base. Le rôle de connexion est créé par l'exploitation : `CREATE ROLE reco_service LOGIN PASSWORD '…' IN ROLE swipread_reco`. | La reco n'écrit rien dans `app` : embeddings dans `reco.article_embeddings` (8.4). Elle ne crée pas le schéma `reco` (créé par V1) mais seulement ses tables (9.1). |
-| Client de reco | `reco/HttpRecommendationClient` appelle `POST {swipread.reco.base-url}/v1/recommendations` (défaut `http://localhost:8081`, variable `SWIPREAD_RECO_URL`, coupure à 300 ms). Le profil `mock-reco` le remplace par `MockRecommendationClient` (articles tirés au hasard) ; `dev` et `test` incluent `mock-reco` (`application.yaml`). | Le backend n'appelle la vraie reco que démarré sans les profils `dev` et `test` (README, « Lancer à côté du backend »). Port par défaut de la reco : 8081. |
-| Flux `events` | Publié par le backend via une table outbox (`V6__event_outbox.sql`, `OutboxRelay`) après l'écriture dans `app.events` : `XADD events MINID ~ (maintenant - 7 j)`, un champ `data` avec le JSON du message. En `dev`, `MockEventsConsumer` le lit dans le groupe `mock-reco` et journalise chaque message. Les messages `user_deleted` demandent d'effacer le profil et les lots du lecteur (contrat v1.5). | Consommé par le worker dans le groupe `reco` (8.6) : profils tenus à jour dans `reco.user_profiles`, données d'un compte supprimé effacées tout de suite. |
-| Ingestion | Module `ingestion` du backend (contrat v1.5, désactivé en `dev` et `test`) : toutes les 15 minutes, lit les flux des sources actives qui ont des thèmes, écrit `app.articles` (`word_count` lu sur la page de l'article quand elle est lisible) et `app.article_topics` (les 1 à 3 thèmes de la source, `confidence` 1,0, 0,9, 0,8 dans l'ordre de `app.source_topics`). En `dev`, rien n'écrit `app.articles` hors données de développement. `db/dev-data/R__2_sample_articles.sql` (profil `dev`) crée 300 articles d'exemple d'une seule source (« Sample article n », en français, `published_at` étalé sur les 300 heures précédant la migration, un thème chacun, sans embedding). `db/seed/R__1_topics.sql` crée 8 thèmes. | Le worker encode ces 300 articles. Une seule source : la règle des sources variées (7.2) est toujours relâchée. Ils sortent du catalogue `MAX_AGE_DAYS` après la migration, qui ne les rajeunit pas. Des titres presque identiques donnent des embeddings très proches : les lots de démonstration ne disent rien de la qualité de l'algo. |
-| Schéma `app` | Migrations V1 à V8 (V8 : `app.source_topics`, état de lecture de `app.sources`, suppression de `reco.user_profiles` et `reco.model_runs` créées par V1). Pas de `status`, `cluster_id`, `content_hash`, `embedding_model` ni `embedded_at` sur `app.articles` ; `app.events.article_id` peut être nul ; type d'événement `unsave`. | Tout article d'une source active est actif ; `cluster_id` nul (7.2) ; événements sans article ignorés et `unsave` lu (4.1). Les tests d'intégration tournent sur une copie de ces migrations (`sql/app_schema.sql`), connectés avec un rôle membre de `swipread_reco`. |
+| Stock kept on a strong event | Strong events: `like`, `save`, `share`, `hide`, and complete `read` (4.4) (`event/StrongEventPolicy.java`). On one of them, `FeedRefiller.invalidate` calls `FeedStore.trim(userId, pageSize)`: it keeps the first 10 articles of the stock, **whatever the position** of the card, then starts a refill. A `hide` also removes the article from the stock. | **Gap with the n+10 rule** decided (section 15, stock rule 4 of the contract), which kept the first `p` articles. With the cards still on the phone (9 − p) and the 10 kept, an interaction on card n shows between card n+11 (last card of the page) and n+20 (first card of the page), not at n+10. The simulation of section 11.3 still imitates the n+10 rule. |
+| Refill after commit | `EventService.ingest` stores the events in a transaction, and only then invalidates the stock. The refill runs in the background, under the lock `feed:{userId}:lock` (5 s); a batch computed while a new invalidation changes `feed:{userId}:ver` is dropped and recomputed once. | Compliant: the replayed profile holds the event, the echo is not lost. |
+| `exclude` | `FeedRefiller.refill` sends the current stock (`LRANGE feed:{userId} 0 -1`), in order, and `count = 50 − size of the stock`. | Compliant: the cards of `exclude` count as placed before the batch (7.2) and remove the echo (4.4). |
+| `seen:{userId}` | Redis set of the articles served, extended at each page (`FeedStore.markSeen`, TTL 30 days). The backend also filters out the articles of the batch already in `seen`. | Compliant: the recommender reads it read-only (7.1). |
+| `fallback:{slug}` | `FallbackFeedProvider` reads the `fallback:{slug}` lists of the reader's topics, shuffled, then completes with the most recent articles of the database. It never writes them. | Compliant: the worker writes them, keyed by slug (8.5). |
+| Rights of the recommender in the database | Migration `V5__reco_role.sql`: group role `swipread_reco`, without login. `SELECT` on `app` (on `app.users`, only `id`, `locale`, `created_at`; nothing on `app.event_outbox` or `app.refresh_tokens`), `USAGE` and `CREATE` on the `reco` schema, read and write on its tables. No `UPDATE` on `app`, no `CREATE` on the database. The login role is created by operations: `CREATE ROLE reco_service LOGIN PASSWORD '…' IN ROLE swipread_reco`. | The recommender writes nothing to `app`: embeddings go to `reco.article_embeddings` (8.4). It does not create the `reco` schema (created by V1), only its tables (9.1). |
+| Recommender client | `reco/HttpRecommendationClient` calls `POST {swipread.reco.base-url}/v1/recommendations` (default `http://localhost:8081`, variable `SWIPREAD_RECO_URL`, 300 ms timeout). The `mock-reco` profile replaces it with `MockRecommendationClient` (random articles); `dev` and `test` include `mock-reco` (`application.yaml`). | The backend only calls the real recommender when started without the `dev` and `test` profiles ([Getting started](getting-started.md#run-next-to-the-api)). Default port of the recommender: 8081. |
+| `events` stream | Published by the backend through an outbox table (`V6__event_outbox.sql`, `OutboxRelay`) after writing to `app.events`: `XADD events MINID ~ (now - 7 d)`, one field `data` with the JSON of the message. In `dev`, `MockEventsConsumer` reads it in the group `mock-reco` and logs each message. `user_deleted` messages ask to erase the reader's profile and batches (contract v1.5). | Consumed by the worker in the group `reco` (8.6): profiles kept up to date in `reco.user_profiles`, data of a deleted account erased at once. |
+| Ingestion | The backend's `ingestion` module (contract v1.5, disabled in `dev` and `test`): every 15 minutes, reads the feeds of the active sources that have topics, writes `app.articles` (`word_count` read from the article's page when it is readable) and `app.article_topics` (the 1 to 3 topics of the source, `confidence` 1.0, 0.9, 0.8 in the order of `app.source_topics`). In `dev`, nothing writes `app.articles` but the development data. `db/dev-data/R__2_sample_articles.sql` (`dev` profile) creates 300 sample articles of a single source ("Sample article n", in French, `published_at` spread over the 300 hours before the migration, one topic each, without embedding). `db/seed/R__1_topics.sql` creates 8 topics. | The worker encodes these 300 articles. A single source: the varied sources rule (7.2) is always relaxed. They leave the catalogue `MAX_AGE_DAYS` after the migration, which does not make them younger. Nearly identical titles give very close embeddings: the demo batches say nothing about the quality of the algorithm. |
+| `app` schema | Migrations V1 to V8 (V8: `app.source_topics`, read state of `app.sources`, drop of `reco.user_profiles` and `reco.model_runs` created by V1). No `status`, `cluster_id`, `content_hash`, `embedding_model` or `embedded_at` on `app.articles`; `app.events.article_id` may be null; event type `unsave`. | Every article of an active source is active; `cluster_id` null (7.2); events without an article ignored and `unsave` read (4.1). The integration tests run on a copy of these migrations (`sql/app_schema.sql`), connected with a role member of `swipread_reco`. |
 
-## 14. Et avec du trafic réel
+## 14. With real traffic
 
-Ce que la v1 écarte, et ce qui déclencherait son ajout :
+What v1 leaves out, and what would trigger adding it:
 
-| Sujet | Ce qu'on ferait | Quand |
+| Topic | What we would do | When |
 | --- | --- | --- |
-| Classement appris | Entraîner un modèle (LightGBM) à prédire l'ouverture à partir des termes du score, sur `reco.feed_items` croisé avec `app.events`, en corrigeant le biais de position | Quelques dizaines de milliers de cartes servies |
-| Popularité | Ajouter un terme « lu par beaucoup de monde » et une source `trending` | Dès qu'il y a plusieurs centaines de lecteurs actifs |
-| Filtrage collaboratif | Recommander ce qu'ont aimé des lecteurs aux goûts proches (`reason = collaborative`) | Idem |
-| A/B test | Servir deux `modelVersion` à deux groupes et comparer les taux d'ouverture | Dès qu'un changement d'algo est en concurrence avec l'existant |
-| Profil incrémental | Appliquer chaque message du flux `events` au profil enregistré au lieu de rejouer l'historique (aujourd'hui le flux déclenche un rejeu complet, 8.6) | Quand l'historique d'un lecteur dépasse quelques milliers d'événements |
-| Recherche approchée | Utiliser l'index HNSW de pgvector au lieu du calcul exact en mémoire | Catalogue au-delà d'environ 100 000 articles |
-| Intérêts regroupés | Résumer les articles aimés en quelques centres plutôt que de les garder tous | Quand les listes d'aimés dépassent quelques centaines |
+| Learned ranking | Train a model (LightGBM) to predict opening from the terms of the score, on `reco.feed_items` joined with `app.events`, correcting the position bias | A few tens of thousands of cards served |
+| Popularity | Add a "read by many people" term and a `trending` reason | As soon as there are several hundred active readers |
+| Collaborative filtering | Recommend what readers with close tastes liked (`reason = collaborative`) | Same |
+| A/B test | Serve two `modelVersion` to two groups and compare the open rates | As soon as a change of algorithm competes with the existing one |
+| Incremental profile | Apply each message of the `events` stream to the stored profile instead of replaying the history (today the stream triggers a full replay, 8.6) | When a reader's history goes beyond a few thousand events |
+| Approximate search | Use pgvector's HNSW index instead of the exact in-memory computation | Catalogue beyond about 100,000 articles |
+| Grouped interests | Sum up the liked articles in a few centres instead of keeping them all | When the liked lists go beyond a few hundred |
 
-Les données nécessaires sont déjà enregistrées par la v1 : chaque carte servie, sa position, son score détaillé et la version de l'algo.
+The data needed is already saved by v1: every card served, its position, its detailed score and the version of the algorithm.
 
-## 15. Origine des décisions
+## 15. Origin of the decisions
 
-| Décision | Prise par |
+| Decision | Made by |
 | --- | --- |
-| Démo devant jury, adaptation visible, produit et technique notés | Enzo |
-| Service en Python, `api.md` et le contrat font référence | Enzo |
-| Règle n+10 sur le stock | Enzo, validée par William |
-| Un poids par thème, plus fort pour les thèmes choisis, non nul pour les autres, ajusté par les interactions, qui donne la proportion affichée | Enzo |
-| Dans un thème, sortir les articles les plus proches de ce que le lecteur a aimé | Enzo |
-| Abandon de LightGBM, popularité, A/B test, centroïdes, vecteur de session ; section « avec du trafic » | Proposé par Claude, accepté par Enzo |
-| Tout le reste : valeurs des paramètres, mise à jour additive avec renormalisation, planchers, plafond à 60 %, valeur unique par article, proximité aux 3 plus proches, terme de rejet, fraîcheur, entrelacement à décalage aléatoire, thème en écho, profil rejoué depuis la base, catalogue en mémoire, modèle d'embedding, tables et routes d'explication, tests | Proposé par Claude, validé par Enzo |
+| Demo to a jury, visible adaptation, product and technique graded | Enzo |
+| Service in Python, the API reference and the contract are the reference | Enzo |
+| n+10 rule on the stock | Enzo, validated by William |
+| One weight per topic, higher for the chosen topics, non-zero for the others, adjusted by the interactions, which gives the proportion shown | Enzo |
+| Within a topic, output the articles closest to what the reader liked | Enzo |
+| Dropping LightGBM, popularity, A/B tests, centroids, session vector; section "with real traffic" | Proposed by Claude, accepted by Enzo |
+| Everything else: parameter values, additive update with renormalisation, floors, 60 % cap, single value per article, closeness to the 3 nearest, rejection term, freshness, interleaving with random offsets, echo topic, profile replayed from the database, in-memory catalogue, embedding model, explanation tables and routes, tests | Proposed by Claude, validated by Enzo |
