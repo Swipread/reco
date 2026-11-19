@@ -14,7 +14,7 @@ D'où le parti pris : un modèle entièrement explicite (des poids par thème et
 ### Objectifs
 
 - Les thèmes choisis à l'inscription forment la base du fil ; les interactions la font évoluer.
-- Une interaction forte sur la carte n change le fil à partir de la carte n+10 (section 13, règle du stock), et le changement est net : la première carte recalculée appartient au thème qui vient d'être aimé, sauf si une carte de ce thème attend déjà dans le stock gardé par le backend (4.4).
+- Une interaction forte sur la carte n change le fil à partir de la carte n+10 (règle du stock décidée avec le backend ; le backend actuel donne entre n+11 et n+20, section 13), et le changement est net : la première carte recalculée appartient au thème qui vient d'être aimé, sauf si une carte de ce thème attend déjà dans le stock gardé par le backend (4.4).
 - Un thème non choisi que le lecteur masque sans l'avoir jamais aimé disparaît du fil.
 - Chaque carte servie est enregistrée avec le détail de son score.
 - La qualité se mesure hors ligne avec des lecteurs simulés (section 11), qui servent aussi de tests d'acceptation.
@@ -68,9 +68,9 @@ Le profil n'est pas stocké : c'est une fonction pure de l'historique. Conséque
 | Lot | La liste d'articles renvoyée par un appel à `/v1/recommendations`. |
 | Catalogue | Les articles recommandables, gardés en mémoire par le service (section 8). |
 
-Le schéma de la base, pour `app` comme pour `reco`, est celui de [database.md](database.md), seul document qui fait foi sur ce sujet. Le service lit `app` en lecture seule (une exception, section 8) et écrit dans `reco`.
+Le schéma `app` est celui que créent les migrations du backend (Swipread/api) ; [database.md](database.md) liste ce que la reco en lit et définit les trois tables de `reco` qui appartiennent au service. Le service lit `app` en lecture seule, sans exception, et écrit dans `reco` : ce sont exactement les droits du rôle `swipread_reco` créé par le backend (section 13).
 
-Le service dépend de l'ingestion pour trois choses : des articles dans `app.articles`, au moins un thème par article dans `app.article_topics`, et un `status` tenu à jour. `cluster_id` est facultatif : s'il est toujours nul, la règle « même actualité » repose sur la seule ressemblance (7.2). Tant que l'ingestion n'existe pas, le développement s'appuie sur le catalogue synthétique de la section 11.
+Le service dépend de l'ingestion pour deux choses : des articles dans `app.articles` et au moins un thème par article dans `app.article_topics`. Le backend n'a pas de statut d'article : tout article d'une source active compte comme actif. Il n'a pas non plus de `cluster_id` : la règle « même actualité » repose sur la seule ressemblance (7.2). Tant que l'ingestion n'existe pas, le développement s'appuie sur le catalogue synthétique de la section 11 et sur les articles d'exemple du backend (section 13).
 
 Tous les paramètres chiffrés sont regroupés en section 10. Dans le texte ils apparaissent sous leur nom (`V_LIKE`, `EPSILON`…).
 
@@ -80,7 +80,7 @@ Le profil contient trois choses : un poids par thème, la liste des articles aim
 
 ### 4.1 Valeur d'un article pour le lecteur
 
-Pour chaque couple (lecteur, article), les événements de type `view`, `open`, `read`, `like`, `unlike`, `save`, `share`, `hide` mettent à jour un état :
+Pour chaque couple (lecteur, article), les événements de type `view`, `open`, `read`, `like`, `unlike`, `save`, `unsave`, `share`, `hide` mettent à jour un état :
 
 | Événement | Effet sur l'état |
 | --- | --- |
@@ -88,12 +88,13 @@ Pour chaque couple (lecteur, article), les événements de type `view`, `open`, 
 | `view` avec `dwellMs ≥ T_LONG` | `vue_longue = vrai` |
 | `view` entre les deux | aucun |
 | `open` | `ouvert = vrai` |
-| `read` | `lecture = max(lecture, c)` avec `c = min(1, readMs / durée_attendue)` et `durée_attendue = word_count / 230 × 60 000` ms. Si `word_count` est nul ou absent, `durée_attendue = 60 000`. `scrollDepth` n'entre pas dans la valeur. |
+| `read` | `lecture = max(lecture, c)` avec `c = min(1, readMs / durée_attendue)` et `durée_attendue = word_count / 230 × 60 000` ms. Si `word_count` est nul ou absent, `durée_attendue = 60 000`. `scrollDepth` n'entre pas dans la valeur et peut manquer : le front web ne le mesure pas. |
 | `like` / `unlike` | `aimé = vrai` / `aimé = faux` |
-| `save`, `share` | `sauvé = vrai`, `partagé = vrai` |
+| `save` / `unsave` | `sauvé = vrai` / `sauvé = faux` |
+| `share` | `partagé = vrai` |
 | `hide` | `masqué = vrai` (définitif) |
 
-`impression` est ignoré. `word_count` vient de `app.articles`.
+`impression` est ignoré, comme tout événement sans article (`app.events.article_id` peut être nul). `word_count` vient de `app.articles`.
 
 La valeur `v` de l'article se déduit de l'état :
 
@@ -160,11 +161,13 @@ Après le rejeu :
 - **aimés** : articles avec `v > 0`, de force `s = min(1, v / V_LIKE)` ;
 - **rejetés** : articles avec `v < 0`, de force `s = 1` si masqué, `S_SKIP` si seulement zappé.
 
-Chaque force est multipliée par un facteur d'ancienneté `0,5 ^ (âge_jours / HALF_LIFE_PROFILE_DAYS)`, où l'âge se compte depuis le dernier événement sur l'article. On garde au plus `PROFILE_MAX_ITEMS` articles par liste, les plus récents. Leurs embeddings sont lus dans `app.articles`, y compris pour des articles sortis du catalogue ; un article sans embedding est écarté de la liste.
+Chaque force est multipliée par un facteur d'ancienneté `0,5 ^ (âge_jours / HALF_LIFE_PROFILE_DAYS)`, où l'âge se compte depuis le dernier événement sur l'article. On garde au plus `PROFILE_MAX_ITEMS` articles par liste, les plus récents. Leurs embeddings sont lus dans `reco.article_embeddings` (8.4), y compris pour des articles sortis du catalogue ; un article sans embedding du modèle courant, ou disparu de `app.articles`, est écarté de la liste.
 
 ### 4.4 Thème en écho
 
-Le **thème en écho** est le thème principal de l'article du plus récent événement `like`, `save`, `share` ou `read` avec `scrollDepth > 0,8`, parmi les événements dont `received_at` est postérieur à la précédente requête de reco du même lecteur (`max(generated_at)` dans `reco.feed_requests`). S'il n'y a pas de tel événement, ou si son thème a un poids nul, il n'y a pas d'écho. Il sert en section 6 à placer ce thème en tête du lot. La liste reprend exactement les événements forts positifs du contrat, ceux qui déclenchent le recalcul du stock : chaque recalcul provoqué par un signal positif a donc son écho. C'est le seul usage de `scrollDepth` ; la valeur d'une lecture reste mesurée par le temps (4.1).
+Le **thème en écho** est le thème principal de l'article du plus récent événement `like`, `save`, `share` ou `read` complet, parmi les événements dont `received_at` est postérieur à la précédente requête de reco du même lecteur (`max(generated_at)` dans `reco.feed_requests`). S'il n'y a pas de tel événement, ou si son thème a un poids nul, il n'y a pas d'écho. Il sert en section 6 à placer ce thème en tête du lot. `unlike`, `unsave` et `hide` ne donnent jamais d'écho.
+
+Un `read` est complet exactement quand le backend le juge fort (`StrongEventPolicy.java`) : `scrollDepth > 0,8`, ou `readMs`, tronqué à l'entier, au moins égal à 60 % de `word_count / 230 × 60 000` ms. Si `word_count` est nul ou inconnu, seule la première condition compte ; un `readMs` absent vaut 0. Le front web n'envoyant pas `scrollDepth`, c'est la seconde condition qui joue en pratique. La liste reprend ainsi exactement les événements forts positifs du backend, ceux qui déclenchent le recalcul du stock : chaque recalcul provoqué par un signal positif a donc son écho. C'est le seul usage de `scrollDepth` ; la valeur d'une lecture reste mesurée par le temps (4.1).
 
 Exception : il n'y a pas d'écho si le stock gardé par le backend (la liste `exclude` de la requête, règle 3 du contrat) contient déjà un article de ce thème. Après plusieurs signaux forts d'affilée, chaque carte servie est la première d'un nouveau lot ; sans cette exception, le fil se réduirait au thème en écho.
 
@@ -240,7 +243,7 @@ Si la lecture de `seen:{userId}` échoue, le service continue avec les autres ex
 
 On parcourt les places dans l'ordre de la section 6.2. Pour une place du thème `t`, on prend le candidat de `t` le mieux classé qui respecte :
 
-1. **pas la même actualité** qu'un article déjà placé dans le lot. Deux articles traitent la même actualité s'ils ont le même `cluster_id` non nul ou si `sim ≥ DUP_SIM` ;
+1. **pas la même actualité** qu'un article déjà placé dans le lot. Deux articles traitent la même actualité s'ils ont le même `cluster_id` non nul ou si `sim ≥ DUP_SIM`. Le backend n'a pas de colonne `cluster_id` : le service le laisse toujours nul, et seule la ressemblance compte. Le code garde la comparaison des `cluster_id`, qu'utilisent les tests et la simulation, pour le jour où l'ingestion en produira ;
 2. **sources variées** : parmi les 9 articles placés juste avant, au plus `SOURCE_MAX − 1` viennent de la même source (soit au plus `SOURCE_MAX` par fenêtre de 10).
 
 Deux compléments à ces règles :
@@ -275,7 +278,7 @@ Le calcul (profil, score, répartition, assemblage) est écrit en fonctions pure
 
 ### 8.2 Catalogue en mémoire
 
-Le processus api charge les articles qui vérifient : `status = 'active'`, embedding présent, `published_at` dans les `MAX_AGE_DAYS` derniers jours, source active, thème principal présent. Pour chacun : id, source, langue, `published_at`, `cluster_id`, thème principal, embedding. Rechargement complet toutes les `CATALOG_REFRESH_S` secondes en arrière-plan, avec remplacement atomique.
+Le processus api charge les articles qui vérifient : embedding du modèle courant présent dans `reco.article_embeddings`, `published_at` dans les `MAX_AGE_DAYS` derniers jours, source active, thème principal présent. Pour chacun : id, source, langue, `published_at`, thème principal, embedding (`cluster_id` est nul, 7.2). Rechargement complet toutes les `CATALOG_REFRESH_S` secondes en arrière-plan, avec remplacement atomique.
 
 À cette échelle (quelques milliers d'articles), les ressemblances se calculent de façon exacte par produit matriciel numpy. L'index HNSW de pgvector n'est pas utilisé par la reco.
 
@@ -296,17 +299,17 @@ Objectif de latence : 95 % des réponses complètes (lecture des événements, c
 
 ### 8.4 Encodage des articles (worker)
 
-Toutes les `ENCODE_INTERVAL_S` secondes, le worker prend jusqu'à 64 articles dont `embedding` est nul ou dont `embedding_model` diffère du modèle courant, les plus récemment ingérés d'abord.
+Toutes les `ENCODE_INTERVAL_S` secondes, le worker prend jusqu'à 64 articles de `app.articles` qui n'ont pas de ligne du modèle courant dans `reco.article_embeddings` (pas de ligne, ou une ligne d'un autre modèle), les plus récemment ingérés d'abord.
 
 - Modèle : `intfloat/multilingual-e5-small` (384 dimensions), sur CPU.
 - Texte encodé : `query: {titre}. {résumé}`, balises HTML retirées du résumé, tronqué à 512 tokens.
-- Vecteur normalisé à 1, écrit dans `embedding`, avec `embedding_model = 'multilingual-e5-small'` et `embedded_at = now()`.
+- Vecteur normalisé à 1, écrit dans `reco.article_embeddings` (une ligne par article, remplacée si elle existe) avec `model = 'multilingual-e5-small'` et `embedded_at`.
 
-C'est la seule écriture de la reco dans `app` ; elle demande un droit limité à ces trois colonnes (section 13). Un article devient recommandable au plus `ENCODE_INTERVAL_S + CATALOG_REFRESH_S` secondes après son ingestion, hors temps d'encodage.
+La reco n'écrit rien dans `app` : le rôle `swipread_reco` du backend n'y a que `SELECT` (section 13). La colonne `app.articles.embedding` du backend n'est ni lue ni écrite par la reco. Un article devient recommandable au plus `ENCODE_INTERVAL_S + CATALOG_REFRESH_S` secondes après son ingestion, hors temps d'encodage.
 
 ### 8.5 Listes de repli (worker)
 
-Toutes les 10 minutes, pour chaque thème : les 50 articles actifs les plus récents (`published_at` décroissant) dont c'est le thème principal, publiés dans les `MAX_AGE_DAYS` derniers jours, écrits dans la liste Redis `fallback:{slug}` avec un TTL de 1 heure. Le remplacement est atomique (écriture dans une clé temporaire puis `RENAME`).
+Toutes les 10 minutes, pour chaque thème : les 50 articles de sources actives les plus récents (`published_at` décroissant) dont c'est le thème principal, publiés dans les `MAX_AGE_DAYS` derniers jours, écrits dans la liste Redis `fallback:{slug}` avec un TTL de 1 heure. Le remplacement est atomique (écriture dans une clé temporaire puis `RENAME`).
 
 ### 8.6 Flux `events`
 
@@ -314,13 +317,13 @@ La v1 ne consomme pas le flux Redis `events`. Le profil est rejoué depuis `app.
 
 ### 8.7 Purge (worker)
 
-Toutes les heures : suppression des lignes de `reco.feed_requests` de plus de 30 jours, et de celles dont le `user_id` n'existe plus dans `app.users`. Les `feed_items` suivent par cascade. La reco ne stocke aucune autre donnée personnelle.
+Toutes les heures : suppression des lignes de `reco.feed_requests` de plus de 30 jours, et de celles dont le `user_id` n'existe plus dans `app.users`. Les `feed_items` suivent par cascade. Les lignes de `reco.article_embeddings` dont l'article n'existe plus dans `app.articles` sont supprimées au même passage. La reco ne stocke aucune autre donnée personnelle.
 
 ## 9. Explication et traçabilité
 
 ### 9.1 Tables
 
-Le service crée au démarrage ses deux tables, `reco.feed_requests` et `reco.feed_items`, si elles n'existent pas. Leur définition est dans [database.md](database.md). Contenu des colonnes `jsonb` :
+Le service crée au démarrage ses trois tables, `reco.feed_requests`, `reco.feed_items` et `reco.article_embeddings` (8.4), si elles n'existent pas. Le schéma `reco` et l'extension `vector` viennent des migrations du backend : le rôle de la reco ne peut pas créer de schéma, et le service s'arrête avec un message explicite s'ils manquent. Leur définition est dans [database.md](database.md). Contenu des colonnes `jsonb` :
 
 - `profile` : `{ "weights": {slug: poids}, "shares": {slug: part après plafond}, "likedCount": n, "rejectedCount": n, "echoTopic": slug ou null, "mu": valeur }`.
 - `params` : les paramètres de la section 10 tels qu'utilisés pour ce lot.
@@ -398,7 +401,7 @@ Tous déterministes (graine et horloge imposées). Les bornes de A1, A2 et A4 va
 
 ### 11.3 Rapport pour le jury
 
-Un script joue 4 lecteurs types sur 100 cartes chacun, en imitant le backend (pages de 10, règle du stock de la section 13), et produit un tableau par lecteur et par page de 10 :
+Un script joue 4 lecteurs types sur 100 cartes chacun, en imitant le backend (pages de 10, règle n+10 du stock décidée avec le backend ; le backend actuel s'en écarte, section 13), et produit un tableau par lecteur et par page de 10 :
 
 - part de cartes pertinentes (dans les goûts déclarés du lecteur simulé) ;
 - part du thème préféré ;
@@ -414,20 +417,22 @@ Lecteurs types : fidèle à ses thèmes choisis ; passionné d'un thème non cho
 - Le format des journaux, l'empaquetage, la conteneurisation.
 - Les tests unitaires au-delà de ceux de la section 11.
 
-## 13. Ajustements des autres documents
+## 13. État du backend (Swipread/api, commit 7549cf5)
 
-Ces ajustements ont été validés et reportés dans les documents concernés. Ils sont rappelés ici parce que l'algo en dépend.
+Ce que le backend fait réellement sur chaque point dont la reco dépend, lu dans son code. Les chemins sont relatifs au dépôt Swipread/api. Le backend fait référence : là où il s'écarte de ce qui avait été décidé, la reco s'adapte ou l'écart est signalé.
 
-| Document | Ajustement |
-| --- | --- |
-| Contrat, règle 4 du stock | Sur un événement fort à la position `p` de la page (index à partir de 0), le backend garde les `p` premiers articles du stock (`LTRIM feed:{userId} 0 p−1`, ou `DEL` si `p = 0`) puis relance un remplissage. Les cartes déjà sur le téléphone plus celles gardées font 9 : une interaction sur la 3ᵉ carte se voit à partir de la 13ᵉ. Vrai tant que le front n'a pas déjà demandé la page suivante. |
-| Contrat, invalidation | Le remplissage déclenché par un événement fort démarre après la validation en base du lot d'événements. Sinon le profil rejoué ne contient pas encore l'événement, et l'écho est perdu. |
-| Contrat, Redis | La reco lit `seen:{userId}` (lecture seule). `fallback:{topic}` est indexé par le `slug` du thème. La reco ne consomme pas le flux `events` en v1. |
-| Contrat, erreurs | 404 seulement si l'utilisateur n'existe pas ; un nouvel inscrit reçoit un lot. |
-| Contrat, base | La reco a `UPDATE (embedding, embedding_model, embedded_at)` sur `app.articles`, lecture seule sur le reste de `app`. La section « Base de données » du contrat renvoie à `database.md`. |
-| `api.md`, événements | La phrase sur les 10 articles conservés est remplacée par la règle n+10. |
-| `database.md` | Schéma unique ; `database_1.md` est supprimé. |
-| `diagrammes-sequence.md`, scénario 3 | Le profil est rejoué à chaque demande de lot, et non plus mis à jour interaction par interaction. |
+| Point | Ce que fait le backend | Pour la reco |
+| --- | --- | --- |
+| Stock gardé sur un événement fort | Événements forts : `like`, `save`, `share`, `hide`, et `read` complet (4.4) (`event/StrongEventPolicy.java`). Sur l'un d'eux, `FeedRefiller.invalidate` appelle `FeedStore.trim(userId, pageSize)` : il garde les 10 premiers articles du stock, **quelle que soit la position** de la carte, puis relance un remplissage. Un `hide` retire en plus l'article du stock. | **Écart avec la règle n+10** décidée (section 15, règle 4 du stock du contrat), qui gardait les `p` premiers articles. Avec les cartes encore sur le téléphone (9 − p) et les 10 gardées, une interaction sur la carte n se voit entre la carte n+11 (dernière carte de la page) et n+20 (première carte de la page), pas à n+10. La simulation de la section 11.3 imite toujours la règle n+10. |
+| Remplissage après validation | `EventService.ingest` enregistre les événements dans une transaction, puis seulement invalide le stock. Le remplissage tourne en tâche de fond, sous le verrou `feed:{userId}:lock` (5 s) ; un lot calculé pendant qu'une nouvelle invalidation change `feed:{userId}:ver` est écarté et recalculé une fois. | Conforme : le profil rejoué contient l'événement, l'écho n'est pas perdu. |
+| `exclude` | `FeedRefiller.refill` envoie le stock actuel (`LRANGE feed:{userId} 0 -1`), dans l'ordre, et `count = 50 − taille du stock`. | Conforme : les cartes de `exclude` comptent comme placées avant le lot (7.2) et suppriment l'écho (4.4). |
+| `seen:{userId}` | Ensemble Redis des articles servis, complété à chaque page (`FeedStore.markSeen`, TTL 30 jours). Le backend filtre aussi les articles du lot déjà dans `seen`. | Conforme : la reco le lit en lecture seule (7.1). |
+| `fallback:{slug}` | `FallbackFeedProvider` lit les listes `fallback:{slug}` des thèmes du lecteur, mélangées, puis complète par les articles les plus récents de la base. Il ne les écrit jamais. | Conforme : le worker les écrit, indexées par slug (8.5). |
+| Droits de la reco en base | Migration `V5__reco_role.sql` : rôle de groupe `swipread_reco`, sans connexion. `SELECT` sur `app` (sur `app.users`, seulement `id`, `locale`, `created_at` ; rien sur `app.event_outbox` ni `app.refresh_tokens`), `USAGE` et `CREATE` sur le schéma `reco`, lecture et écriture sur ses tables. Aucun `UPDATE` sur `app`, pas de `CREATE` sur la base. Le rôle de connexion est créé par l'exploitation : `CREATE ROLE reco_service LOGIN PASSWORD '…' IN ROLE swipread_reco`. | La reco n'écrit rien dans `app` : embeddings dans `reco.article_embeddings` (8.4). Elle ne crée pas le schéma `reco` (créé par V1) mais seulement ses tables (9.1). |
+| Client de reco | `reco/HttpRecommendationClient` appelle `POST {swipread.reco.base-url}/v1/recommendations` (défaut `http://localhost:8081`, variable `SWIPREAD_RECO_URL`, coupure à 300 ms). Le profil `mock-reco` le remplace par `MockRecommendationClient` (articles tirés au hasard) ; `dev` et `test` incluent `mock-reco` (`application.yaml`). | Le backend n'appelle la vraie reco que démarré sans les profils `dev` et `test` (README, « Lancer à côté du backend »). Port par défaut de la reco : 8081. |
+| Flux `events` | Publié par le backend via une table outbox (`V6__event_outbox.sql`, `OutboxRelay`). En `dev`, `MockEventsConsumer` le lit dans le groupe `mock-reco` et journalise chaque message. Les messages `user_deleted` demandent d'effacer `reco.user_profiles`. | Non consommé par la reco (8.6). Elle n'utilise pas `reco.user_profiles` ; les lots d'un compte supprimé partent à la purge suivante (8.7). |
+| Ingestion | Absente du backend : rien n'écrit `app.articles` hors données de développement. `db/dev-data/R__2_sample_articles.sql` (profil `dev`) crée 300 articles d'exemple d'une seule source (« Sample article n », en français, `published_at` étalé sur les 300 heures précédant la migration, un thème chacun, sans embedding). `db/seed/R__1_topics.sql` crée 8 thèmes. | Le worker encode ces 300 articles. Une seule source : la règle des sources variées (7.2) est toujours relâchée. Ils sortent du catalogue `MAX_AGE_DAYS` après la migration, qui ne les rajeunit pas. Des titres presque identiques donnent des embeddings très proches : les lots de démonstration ne disent rien de la qualité de l'algo. |
+| Schéma `app` | Migrations V1 à V7. Pas de `status`, `cluster_id`, `content_hash`, `embedding_model` ni `embedded_at` sur `app.articles` ; `app.events.article_id` peut être nul ; type d'événement `unsave`. | Tout article d'une source active est actif ; `cluster_id` nul (7.2) ; événements sans article ignorés et `unsave` lu (4.1). Les tests d'intégration tournent sur une copie de ces migrations (`sql/app_schema.sql`), connectés avec un rôle membre de `swipread_reco`. |
 
 ## 14. Et avec du trafic réel
 
