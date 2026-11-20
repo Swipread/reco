@@ -5,7 +5,7 @@ Service de recommandation de Swipread : compose pour chaque lecteur un lot d'art
 ## Sources de vérité
 
 - Algorithme, paramètres, tests d'acceptation : `docs/algorithm.md` (« la spec » des commentaires du code, dont les numéros de section sont stables). Tout changement d'algorithme y est reporté.
-- La spécification d'origine, en français, est gardée dans `notes/algo_reco.md` (document interne, ignoré par git) : historique de conception, ne plus la mettre à jour.
+- La spécification d'origine, en français, est archivée dans `notes/archive/algo_reco-5897d27.md` (document interne, ignoré par git, périmé) ; la version française à jour est `../docs/07-algorithme-reco.md`.
 - Échanges avec le backend : `notes/Contrat backend reco.md` (copie du contrat de l'API, ignorée par git). Ne jamais changer un format du contrat sans accord explicite ; signaler toute ambiguïté au lieu de trancher seul.
 - Schéma `app` : les migrations Flyway de Swipread/api font foi. `sql/app_schema.sql` les recopie pour les tests d'intégration : le tenir à jour à chaque nouvelle migration du backend, sans rien y ajouter qu'elles ne créent.
 
