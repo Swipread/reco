@@ -2,8 +2,8 @@
 
 | Suite | Command | Needs | Count |
 | --- | --- | --- | --- |
-| Unit, API, acceptance | `uv run pytest -m "not perf"` | nothing | 217 |
-| Integration | `RECO_TEST_DSN=… uv run pytest tests/integration -q` | a disposable PostgreSQL | 24 |
+| Unit, API, acceptance | `uv run pytest -m "not perf"` | nothing | 221 |
+| Integration | `RECO_TEST_DSN=… uv run pytest tests/integration -q` | a disposable PostgreSQL | 28 |
 | Performance (A13) | `uv run pytest -m perf` | nothing | 1 |
 | End to end | `SWIPREAD_API_DIR=../api scripts/e2e.sh` | JDK 25, Docker, a clone of the API, the embedding model | 11 |
 

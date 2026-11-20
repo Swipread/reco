@@ -292,3 +292,49 @@ def test_ensure_schema_is_safe_when_both_processes_start_together(reco_dsn):
         for s in stores:
             s.close()
     assert errors == []
+
+
+def test_word_count_counted_on_the_summary_only_is_not_given(store, seed, conn):
+    conn.execute("UPDATE app.articles SET word_count_from_summary = true WHERE id = 'a_old'")
+    insert_event(conn, "e_1", "read", "a_ok", 2, payload={"readMs": 9000})
+    insert_event(conn, "e_2", "read", "a_old", 1, payload={"readMs": 9000})
+    counts = {e.article_id: e.word_count for e in store.events("u_1", 10)}
+    assert counts == {"a_ok": 100, "a_old": None}
+
+
+def card_event(conn, event_id, type_, article_id, request_id, hours_ago, user_id="u_1"):
+    occurred = NOW - timedelta(hours=hours_ago)
+    conn.execute(
+        "INSERT INTO app.events (event_id, user_id, session_id, type, article_id, request_id,"
+        " occurred_at, received_at) VALUES (%s, %s, 's_1', %s, %s, %s, %s, %s)",
+        (event_id, user_id, type_, article_id, request_id, occurred, occurred),
+    )
+
+
+def test_reason_outcomes_count_what_readers_did_with_each_reason(store, seed, conn):
+    save(store, "r_1", "u_1", NOW - timedelta(hours=5), ids=("a_ok", "a_old", "a_noemb"))
+    conn.execute("UPDATE reco.feed_items SET reason = 'explore' WHERE article_id IN ('a_old', 'a_noemb')")
+    # similar: shown and liked; shown twice counts once
+    card_event(conn, "e_1", "impression", "a_ok", "r_1", 4)
+    card_event(conn, "e_2", "impression", "a_ok", "r_1", 3.5)
+    card_event(conn, "e_3", "like", "a_ok", "r_1", 3)
+    # explore: one opened then hidden, one shown to another reader and left alone
+    card_event(conn, "e_4", "impression", "a_old", "r_1", 4)
+    card_event(conn, "e_5", "open", "a_old", "r_1", 3.9)
+    card_event(conn, "e_6", "hide", "a_old", "r_1", 3.8)
+    card_event(conn, "e_7", "impression", "a_noemb", "r_1", 4, user_id="u_2")
+    # fallback: shown and read
+    card_event(conn, "e_8", "impression", "a_inactive", "fallback", 2)
+    card_event(conn, "e_9", "read", "a_inactive", "fallback", 1.5)
+    # ignored: an article that is not in its batch, an unknown batch, a card shown before the period
+    card_event(conn, "e_10", "impression", "a_notopic", "r_1", 2)
+    card_event(conn, "e_11", "impression", "a_ok", "r_gone", 2)
+    card_event(conn, "e_12", "impression", "a_noemb", "r_1", 30)
+
+    outcomes = store.reason_outcomes(NOW - timedelta(hours=24))
+
+    assert [dataclasses.astuple(o) for o in outcomes] == [
+        ("explore", 2, 2, 1, 0, 1),
+        ("fallback", 1, 1, 1, 0, 0),
+        ("similar", 1, 1, 0, 1, 0),
+    ]

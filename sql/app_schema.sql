@@ -13,6 +13,9 @@
 --   V9__drop_article_embedding_and_check_events.sql
 --                                       drop of app.articles.embedding and its index, NOT NULL
 --                                       app.events.article_id, CHECK on app.events.type
+--   V10__article_word_count_from_summary.sql
+--                                       app.articles.word_count_from_summary (its backfill UPDATE
+--                                       is left out: it does nothing on an empty database)
 -- Statements are copied as they are, in migration order; keep in sync with new migrations.
 -- The backend's tables are the reference: never add here what its migrations do not create.
 -- The reco's own tables are created by the service itself (PgStore.ensure_schema).
@@ -223,3 +226,8 @@ ALTER TABLE app.articles DROP COLUMN embedding;
 ALTER TABLE app.events ALTER COLUMN article_id SET NOT NULL;
 ALTER TABLE app.events ADD CONSTRAINT events_type_check
   CHECK (type IN ('impression', 'view', 'open', 'read', 'like', 'unlike', 'save', 'unsave', 'share', 'hide'));
+
+-- Vrai quand la page de l'article n'a pas pu être lue (robots.txt, défi anti-robot…) et que le flux ne donne que le
+-- titre et le résumé : word_count est alors bien trop petit pour estimer un temps de lecture, et aucune lecture
+-- complète ne s'en déduit.
+ALTER TABLE app.articles ADD COLUMN word_count_from_summary boolean NOT NULL DEFAULT false;

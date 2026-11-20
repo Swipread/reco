@@ -80,6 +80,7 @@ The service needs the API's schema (its Flyway migrations create the `app` and `
 ```bash
 uv run python -m swipread_reco worker   # encodes articles, writes fallback lists, reads the stream
 uv run python -m swipread_reco api      # listens on 127.0.0.1:8081
+uv run python -m swipread_reco reasons  # success of each reason on real readers, last 30 days
 curl -s localhost:8081/healthz
 ```
 
@@ -100,9 +101,10 @@ The request and response formats are the API's: [API reference](https://github.c
 
 ```text
 src/swipread_reco/
-├── __main__.py       entry point: python -m swipread_reco api | worker
+├── __main__.py       entry point: python -m swipread_reco api | worker | reasons
 ├── api.py            POST /v1/recommendations, /healthz
 ├── explain.py        explanation routes
+├── reasons.py        success of each reason on real readers (spec 11.4)
 ├── recommend.py      the pipeline: profile, score, allocation, assembly
 ├── profile.py        replay of the events into a profile (pure)
 ├── profiles.py       stored profile: fresh, or replayed and stored again
@@ -122,12 +124,12 @@ scripts/e2e.sh        end-to-end run against the real API
 ## Testing
 
 ```bash
-uv run pytest -m "not perf"   # 217 unit, API and acceptance tests, no infrastructure
+uv run pytest -m "not perf"   # 221 unit, API and acceptance tests, no infrastructure
 uv run ruff check
 RECO_TEST_DSN=postgresql://postgres:postgres@localhost:5433/postgres uv run pytest tests/integration -q
 ```
 
-The 24 integration tests rebuild the API's schema in a disposable database and run as a member of the recommender's role, which proves its rights are enough. GitHub Actions runs the lint, the unit and the integration tests on every push and pull request. Apart: a performance test (`-m perf`, 80 ms at the 95th percentile for 5,000 articles) and 11 end-to-end scenarios against the real API (`scripts/e2e.sh`). → [Testing](docs/testing.md)
+The 28 integration tests rebuild the API's schema in a disposable database and run as a member of the recommender's role, which proves its rights are enough. GitHub Actions runs the lint, the unit and the integration tests on every push and pull request. Apart: a performance test (`-m perf`, 80 ms at the 95th percentile for 5,000 articles) and 11 end-to-end scenarios against the real API (`scripts/e2e.sh`). → [Testing](docs/testing.md)
 
 A report on four simulated readers over 100 cards, page by page, is written by `uv run python -m swipread_reco.sim.report --out report/`.
 

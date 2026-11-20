@@ -34,9 +34,9 @@ Read only; the recommender never writes to `app`.
 | `app.topics` | `id`, `slug`, `label` | List of topics, slugs of the `fallback:{slug}` lists |
 | `app.user_topics` | `user_id`, `topic_id` | Chosen topics |
 | `app.sources` | `id`, `active` | Only the articles of active sources are recommendable |
-| `app.articles` | `id`, `source_id`, `title`, `summary`, `language`, `word_count`, `published_at`, `ingested_at` | Catalogue, encoding, titles of the explanation routes. `embedding` is neither read nor written |
+| `app.articles` | `id`, `source_id`, `title`, `summary`, `language`, `word_count`, `word_count_from_summary`, `published_at`, `ingested_at` | Catalogue, encoding, titles of the explanation routes; reading time, unknown when the count comes from the summary only (API migration V10) |
 | `app.article_topics` | `article_id`, `topic_id`, `confidence` | Main topic of an article |
-| `app.events` | `event_id`, `user_id`, `type`, `article_id`, `payload`, `occurred_at`, `received_at` | Replay of the profile and mark of `reco.user_profiles`. Types read: `view`, `open`, `read`, `like`, `unlike`, `save`, `unsave`, `share`, `hide`; rows without `article_id` are ignored |
+| `app.events` | `event_id`, `user_id`, `type`, `article_id`, `request_id`, `payload`, `occurred_at`, `received_at` | Replay of the profile and mark of `reco.user_profiles`. Types read: `view`, `open`, `read`, `like`, `unlike`, `save`, `unsave`, `share`, `hide`; rows without `article_id` are ignored ; cards and their outcome for `reasons` (algorithm 11.4) |
 | `app.user_articles` | `user_id`, `article_id` | Articles the reader already met, left out of the batches |
 
 The API has neither an article status nor a `cluster_id`: every article of an active source is active, and the "same story" rule rests on similarity alone ([algorithm](algorithm.md), 7.2).

@@ -20,6 +20,7 @@ from swipread_reco.models import (
     Lot,
     ProfileItem,
     ProfileState,
+    ReasonOutcome,
     StoredProfile,
     Topic,
     WeightChange,
@@ -232,7 +233,8 @@ def _events(
           LIMIT %(limit)s
         )
         SELECT r.event_id, r.type, r.article_id, r.occurred_at, r.received_at,
-               r.payload, p.topic_id, a.word_count
+               r.payload, p.topic_id,
+               CASE WHEN a.word_count_from_summary THEN NULL ELSE a.word_count END
         FROM recent r
         LEFT JOIN app.articles a ON a.id = r.article_id
         LEFT JOIN LATERAL (
@@ -574,6 +576,47 @@ class PgStore:
                 {"now": now, "max_age_days": max_age_days, "topic_id": topic_id, "limit": limit},
             ).fetchall()
         return [r[0] for r in rows]
+
+    def reason_outcomes(self, since: datetime) -> list[ReasonOutcome]:
+        """Per reason, what readers did with the cards shown to them since `since` (spec 11.4).
+
+        A card is an impression event whose (requestId, articleId) is an item of a stored batch,
+        or whose requestId is "fallback". Its outcome is any later event on the same pair; events
+        before `since` are not read, which keeps to the recent partitions of app.events.
+        """
+        with self._pool.connection() as conn:
+            rows = conn.execute(
+                """
+                WITH recent AS (
+                  SELECT user_id, type, article_id, request_id FROM app.events
+                  WHERE occurred_at >= %(since)s AND request_id IS NOT NULL
+                ),
+                shown AS (
+                  SELECT DISTINCT e.user_id, e.request_id, e.article_id,
+                         COALESCE(i.reason, 'fallback') AS reason
+                  FROM recent e
+                  LEFT JOIN reco.feed_items i
+                    ON i.request_id = e.request_id AND i.article_id = e.article_id
+                  WHERE e.type = 'impression'
+                    AND (i.reason IS NOT NULL OR e.request_id = 'fallback')
+                ),
+                cards AS (
+                  SELECT s.reason, s.request_id, s.article_id, s.user_id,
+                         bool_or(e.type IN ('open', 'read')) AS opened,
+                         bool_or(e.type IN ('like', 'save', 'share')) AS positive,
+                         bool_or(e.type = 'hide') AS hidden
+                  FROM shown s
+                  JOIN recent e ON e.user_id = s.user_id AND e.request_id = s.request_id
+                               AND e.article_id = s.article_id
+                  GROUP BY s.reason, s.request_id, s.article_id, s.user_id
+                )
+                SELECT reason, count(*), count(DISTINCT user_id), count(*) FILTER (WHERE opened),
+                       count(*) FILTER (WHERE positive), count(*) FILTER (WHERE hidden)
+                FROM cards GROUP BY reason ORDER BY reason
+                """,
+                {"since": since},
+            ).fetchall()
+        return [ReasonOutcome(*row) for row in rows]
 
     def purge(self, now: datetime, retention_days: int) -> int:
         """Delete requests older than `retention_days` or of users gone from app.users (8.7),

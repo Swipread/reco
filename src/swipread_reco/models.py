@@ -29,7 +29,19 @@ class Event:
     received_at: datetime
     payload: Mapping[str, Any]   # as sent by the front end (api.md)
     topic_id: int | None         # article's main topic, None if unknown
-    word_count: int | None       # app.articles.word_count, None if article unknown
+    word_count: int | None       # app.articles.word_count; None if the article is unknown or its
+                                 # count comes from the feed's title and summary only
+
+
+@dataclass(frozen=True)
+class ReasonOutcome:
+    """What real readers did with the cards of one `reason` (spec 11.4)."""
+    reason: str                  # similar, onboarding, explore, or fallback (backend's feed)
+    cards: int                   # distinct (batch, article) pairs with an impression
+    readers: int
+    opened: int                  # cards followed by an open or a read
+    positive: int                # cards followed by a like, save or share
+    hidden: int                  # cards followed by a hide
 
 
 @dataclass(frozen=True)

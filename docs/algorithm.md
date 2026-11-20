@@ -88,13 +88,13 @@ For each (reader, article) pair, the events of type `view`, `open`, `read`, `lik
 | `view` with `dwellMs ≥ T_LONG` | `long_view = true` |
 | `view` in between | none |
 | `open` | `opened = true` |
-| `read` | `read = max(read, c)` with `c = min(1, readMs / expected_time)` and `expected_time = word_count / 230 × 60,000` ms. If `word_count` is zero or missing, `expected_time = 60,000`. `scrollDepth` does not enter the value and may be missing: the web app does not measure it. |
+| `read` | `read = max(read, c)` with `c = min(1, readMs / expected_time)` and `expected_time = word_count / 230 × 60,000` ms. If `word_count` is zero or missing, `expected_time = 60,000`. It is missing too when the backend could only count the feed's title and summary (`app.articles.word_count_from_summary`, contract v1.7): such a count says nothing of the article's length. `scrollDepth` does not enter the value and may be missing: the web app does not measure it. |
 | `like` / `unlike` | `liked = true` / `liked = false` |
 | `save` / `unsave` | `saved = true` / `saved = false` |
 | `share` | `shared = true` |
 | `hide` | `hidden = true` (final) |
 
-`impression` is ignored. `word_count` comes from `app.articles`.
+`impression` is ignored. `word_count` comes from `app.articles`, and is unknown when `word_count_from_summary` is true.
 
 The value `v` of the article follows from the state:
 
@@ -167,7 +167,7 @@ Each strength is multiplied by an age factor `0.5 ^ (age_days / HALF_LIFE_PROFIL
 
 The **echo topic** is the main topic of the article of the most recent `like`, `save`, `share` or complete `read` event, among the events whose `received_at` is later than the reader's previous recommendation request (`max(generated_at)` in `reco.feed_requests`). If there is no such event, or if its topic has a zero weight, there is no echo. Section 6 uses it to put that topic first in the batch. `unlike`, `unsave` and `hide` never give an echo.
 
-A `read` is complete exactly when the backend judges it strong (`StrongEventPolicy.java`): `scrollDepth > 0.8`, or `readMs`, truncated to an integer, at least 60 % of `word_count / 230 × 60,000` ms. If `word_count` is zero or unknown, only the first condition counts; a missing `readMs` counts as 0. The web app does not send `scrollDepth`, so in practice the second condition applies. The list is thus exactly the backend's strong positive events, those that trigger the recomputation of the stock: every recomputation caused by a positive signal has its echo. This is the only use of `scrollDepth`; the value of a read is still measured by time (4.1).
+A `read` is complete exactly when the backend judges it strong (`StrongEventPolicy.java`): `scrollDepth > 0.8`, or `readMs`, truncated to an integer, at least 60 % of `word_count / 230 × 60,000` ms. If `word_count` is zero or unknown (counted on the summary only included, as in the backend), only the first condition counts; a missing `readMs` counts as 0. The web app does not send `scrollDepth`, so in practice the second condition applies. The list is thus exactly the backend's strong positive events, those that trigger the recomputation of the stock: every recomputation caused by a positive signal has its echo. This is the only use of `scrollDepth`; the value of a read is still measured by time (4.1).
 
 Exception: there is no echo if the stock the backend kept (the request's `exclude` list, rule 3 of the contract) already holds an article of that topic. After several strong signals in a row, every card served is the first of a new batch; without this exception the feed would shrink to the echo topic.
 
@@ -392,3 +392,17 @@ A script plays 4 typical readers over 100 cards each, imitating the backend (pag
 - number of distinct topics and sources.
 
 Typical readers: faithful to their chosen topics; passionate about an unchosen topic; allergic to a chosen topic; a reader who skips everything. Each reader follows a fixed rule (likes such subtopic, hides such topic, skips the rest). Output in Markdown and CSV.
+
+### 11.4 Success of each reason on real readers
+
+`python -m swipread_reco reasons [--days N]` (30 days by default, the retention of the batches) prints, for each `reason`, what real readers did with the cards they were shown. A card is an `impression` event whose `requestId` and `articleId` are an item of a stored batch (`reco.feed_items` gives its reason), or whose `requestId` is `fallback` (the backend's fallback feed, row `fallback`, for comparison). Each card counts once per batch, article and reader.
+
+| Column | Meaning |
+| --- | --- |
+| Cartes | Cards shown |
+| Lecteurs | Distinct readers |
+| Ouvertes | Share of the cards followed by an `open` or a `read` |
+| Aimées, sauvegardées ou partagées | Share followed by a `like`, `save` or `share` |
+| Masquées | Share followed by a `hide` |
+
+Exploration succeeds when its cards are opened and kept about as often as the others, and hidden not much more. The table reads only `app.events` of the period and `reco.feed_items`; it writes nothing.

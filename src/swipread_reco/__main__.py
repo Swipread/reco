@@ -1,4 +1,4 @@
-"""Entry point: `python -m swipread_reco api` or `python -m swipread_reco worker`.
+"""Entry point: `python -m swipread_reco api`, `worker`, or `reasons [--days N]` (spec 11.4).
 
 Both read RECO_DATABASE_URL, RECO_REDIS_URL, RECO_DB_TIMEOUT_S (default 2) and the RECO_*
 overrides of Params; the api also reads RECO_HOST (default 127.0.0.1) and RECO_PORT
@@ -20,6 +20,7 @@ import uvicorn
 from swipread_reco.api import RedisSeen, create_app, utcnow
 from swipread_reco.catalog_cache import CatalogCache
 from swipread_reco.params import Params
+from swipread_reco.reasons import DEFAULT_DAYS, report
 from swipread_reco.store import DEFAULT_POOL_TIMEOUT_S, PgStore
 from swipread_reco.worker import run_worker
 from swipread_reco.worker.encode import E5Encoder
@@ -106,10 +107,24 @@ def run_worker_process() -> None:
         store.close()
 
 
+def run_reasons(days: int) -> None:
+    """Print the success of each reason on real readers over the last `days` days."""
+    store = open_store()
+    try:
+        print(report(store, utcnow(), days), end="")
+    finally:
+        store.close()
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(prog="python -m swipread_reco")
-    parser.add_argument("command", choices=["api", "worker"])
+    parser.add_argument("command", choices=["api", "worker", "reasons"])
+    parser.add_argument("--days", type=int, default=DEFAULT_DAYS,
+                        help="reasons: period, in days (default %(default)s)")
     args = parser.parse_args()
+    if args.command == "reasons":
+        run_reasons(args.days)
+        return
     logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s %(message)s")
     log.info("swipread-reco %s, %s", package_version(), args.command)
     if args.command == "api":
