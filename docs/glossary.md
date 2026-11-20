@@ -9,7 +9,7 @@
 | **Catalogue** | The recommendable articles (embedded, recent, of an active source, with a main topic), kept in memory by the api |
 | **Closeness** (`affinity`) | Mean of the 3 best strength × similarity values between a candidate and the liked articles |
 | **Complete read** | A `read` the API judges strong: `scrollDepth > 0.8`, or `readMs` at least 60 % of the expected reading time |
-| **Contract** | The interface agreement between the API and the recommender, versioned (v1.5), internal to the teams |
+| **Contract** | The interface agreement between the API and the recommender, versioned (v1.6), internal to the teams |
 | **Echo topic** | Topic of the latest strong positive signal since the previous batch, placed first in the next one |
 | **Embedding** | 384-number unit vector of an article (`multilingual-e5-small` on `query: title. summary`), in `reco.article_embeddings` |
 | **Exclude** | The cards still in the API's stock, sent with each request: never recommended again, counted as placed before the batch |
