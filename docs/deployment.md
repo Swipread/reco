@@ -50,7 +50,7 @@ git tag -a v1.2.0 -m "v1.2.0"
 git push origin v1.2.0
 ```
 
-Only admins can create, move or delete `v*` tags (a tag ruleset). A tag with a suffix, such as `v1.2.0-rc.1`, makes a pre-release, deployed the same way. The recommender, the API and the web app are versioned independently; the interface between the API and the recommender is versioned by the backend contract (v1.6).
+Only admins can create, move or delete `v*` tags (a tag ruleset). A tag with a suffix, such as `v1.2.0-rc.1`, makes a pre-release, deployed the same way. The recommender, the API and the web app are versioned independently; the interface between the API and the recommender is versioned by the backend contract (v1.7).
 
 The [`Release`](../.github/workflows/release.yml) workflow then runs:
 

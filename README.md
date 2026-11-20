@@ -137,7 +137,7 @@ Both processes read their settings from environment variables: `RECO_DATABASE_UR
 
 ## Project status
 
-The algorithm of the specification is implemented with its acceptance tests and explanation routes, and the interface with the API follows contract v1.6: the recommender consumes the events stream and keeps reader profiles. It runs next to the real API in the end-to-end tests. Version 1.0.1 is in production: a version tag on `main` runs the checks, builds the container image (CPU-only torch, embedding model included), deploys it next to the API and creates the GitHub release. → [Deployment](docs/deployment.md)
+The algorithm of the specification is implemented with its acceptance tests and explanation routes, and the interface with the API follows contract v1.7: the recommender consumes the events stream and keeps reader profiles. It runs next to the real API in the end-to-end tests. Version 1.0.1 is in production: a version tag on `main` runs the checks, builds the container image (CPU-only torch, embedding model included), deploys it next to the API and creates the GitHub release. → [Deployment](docs/deployment.md)
 
 ## Documentation
 
