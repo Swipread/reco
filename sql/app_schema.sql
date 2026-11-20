@@ -17,6 +17,7 @@
 --                                       app.articles.word_count_from_summary (its backfill UPDATE
 --                                       is left out: it does nothing on an empty database)
 --   V11__mail_outbox.sql                app.mail_outbox, out of the reco's reach
+--   V12__email_verification.sql        app.users.email_verified_at, app.user_tokens (out of reach)
 -- Statements are copied as they are, in migration order; keep in sync with new migrations.
 -- The backend's tables are the reference: never add here what its migrations do not create.
 -- The reco's own tables are created by the service itself (PgStore.ensure_schema).
@@ -252,3 +253,22 @@ CREATE INDEX mail_outbox_due_idx ON app.mail_outbox (next_attempt_at) WHERE fail
 
 -- Adresses et liens personnels : la reco n'y a pas accès (droits par défaut posés par V5)
 REVOKE ALL ON app.mail_outbox FROM swipread_reco;
+
+-- Vérification de l'adresse mail : date de la confirmation, NULL tant que le lecteur n'a pas cliqué le lien.
+-- Les comptes existants commencent non vérifiés. La reco n'y a pas accès (droits par colonne de V5).
+ALTER TABLE app.users ADD COLUMN email_verified_at timestamptz;
+
+-- Liens à usage unique envoyés par mail (vérification de l'adresse, mot de passe oublié), jamais stockés en clair :
+-- seulement leur SHA-256.
+CREATE TABLE app.user_tokens (
+  id         uuid PRIMARY KEY,
+  user_id    text NOT NULL REFERENCES app.users(id) ON DELETE CASCADE,
+  purpose    text NOT NULL CONSTRAINT user_tokens_purpose_check CHECK (purpose IN ('verify_email', 'reset_password')),
+  token_hash text NOT NULL UNIQUE,              -- SHA-256 en hexadécimal
+  created_at timestamptz NOT NULL,
+  expires_at timestamptz NOT NULL,
+  used_at    timestamptz
+);
+CREATE INDEX user_tokens_user_idx ON app.user_tokens (user_id, purpose, created_at DESC);
+
+REVOKE ALL ON app.user_tokens FROM swipread_reco;
