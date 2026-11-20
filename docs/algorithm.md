@@ -94,7 +94,7 @@ For each (reader, article) pair, the events of type `view`, `open`, `read`, `lik
 | `share` | `shared = true` |
 | `hide` | `hidden = true` (final) |
 
-`impression` is ignored, like any event without an article (`app.events.article_id` may be null). `word_count` comes from `app.articles`.
+`impression` is ignored. `word_count` comes from `app.articles`.
 
 The value `v` of the article follows from the state:
 

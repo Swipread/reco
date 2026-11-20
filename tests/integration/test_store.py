@@ -128,7 +128,6 @@ def test_events_are_limited_to_most_recent_and_carry_topic(store, seed, conn):
     insert_event(conn, "e_3", "read", "a_ok", 3, payload={"readMs": 9000, "scrollDepth": 0.9})
     insert_event(conn, "e_4", "like", "a_ok", 2)
     insert_event(conn, "e_5", "hide", "a_gone", 1, payload={"reason": "boring"})
-    insert_event(conn, "e_6", "open", None, 0.5)    # article_id is nullable: never returned
     events = store.events("u_1", 3)
     assert sorted(e.event_id for e in events) == ["e_3", "e_4", "e_5"]
     by_id = {e.event_id: e for e in events}
@@ -157,7 +156,7 @@ def test_embeddings_roundtrip_and_skip_missing(store, seed, conn):
         "INSERT INTO reco.article_embeddings VALUES ('a_nope', %s, %s, %s)",
         (unit_vector(9), EMBEDDING_MODEL, NOW),
     )
-    # a_noemb has only app.articles.embedding, a_othermodel another model, a_nope no article.
+    # a_noemb has no embedding, a_othermodel another model, a_nope no article.
     found = store.embeddings(["a_ok", "a_noemb", "a_othermodel", "a_nope"])
     assert set(found) == {"a_ok"}
     assert found["a_ok"].dtype == np.float32
@@ -222,7 +221,7 @@ def test_articles_to_embed_and_write(store, seed, conn):
     assert [a[0] for a in store.articles_to_embed("other-model", 3)] == [
         "a_notopic", "a_inactive", "a_old"
     ]
-    app_before = conn.execute("SELECT id, embedding FROM app.articles ORDER BY id").fetchall()
+    app_before = conn.execute("SELECT * FROM app.articles ORDER BY id").fetchall()
 
     later = NOW + timedelta(hours=1)
     store.write_embeddings(
@@ -240,7 +239,7 @@ def test_articles_to_embed_and_write(store, seed, conn):
     assert rows == [("a_noemb", EMBEDDING_MODEL, later), ("a_othermodel", EMBEDDING_MODEL, later)]
     # The upsert replaced a_othermodel's old-model row; app.articles is untouched.
     assert [r.id for r in store.catalog_rows(NOW, 14)] == ["a_noemb", "a_ok", "a_othermodel"]
-    assert conn.execute("SELECT id, embedding FROM app.articles ORDER BY id").fetchall() == app_before
+    assert conn.execute("SELECT * FROM app.articles ORDER BY id").fetchall() == app_before
 
 
 def test_fallback_ids_newest_first(store, seed):

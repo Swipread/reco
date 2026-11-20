@@ -24,7 +24,7 @@ class Topic:
 class Event:
     event_id: str
     type: str                    # view, open, read, like, unlike, save, unsave, share, hide
-    article_id: str | None       # app.events.article_id is nullable; such events are ignored
+    article_id: str
     occurred_at: datetime
     received_at: datetime
     payload: Mapping[str, Any]   # as sent by the front end (api.md)

@@ -184,17 +184,6 @@ def test_echo_read_rule_mirrors_the_backend(payload, word_count, strong):
     assert (p.echo_topic == 2) is strong
 
 
-def test_events_without_article_are_ignored():
-    events = [
-        ev("like", None, 4, 6, received_minutes_ago=6), ev("hide", None, 1, 5),
-        ev("open", "a", 1, 4),
-    ]
-    p = build_profile(events, TOPICS, CHOSEN, NOW, NOW - timedelta(minutes=10), Params())
-    only = build_profile([events[2]], TOPICS, CHOSEN, NOW, NOW - timedelta(minutes=10), Params())
-    assert p == only
-    assert p.echo_topic is None and p.touched_article_ids == {"a"}
-
-
 def _mixed_events():
     events = [ev("like", f"l{k}", 1 + k % 4, 600 - k) for k in range(80)]
     events += [ev("hide", f"h{k}", 5, 300 - k) for k in range(5)]

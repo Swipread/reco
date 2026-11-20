@@ -187,13 +187,10 @@ PROFILE_HISTORY_MAX = 50
 
 
 def _replay_order(events: Sequence[Event]) -> list[Event]:
-    """Events oldest first by (occurred_at, event_id), each event_id once, those without article
-    left out."""
+    """Events oldest first by (occurred_at, event_id), each event_id once."""
     replay: list[Event] = []
     seen: set[str] = set()
     for event in sorted(events, key=lambda e: (e.occurred_at, e.event_id)):
-        if event.article_id is None:   # app.events.article_id is nullable: nothing to fold
-            continue
         if event.event_id not in seen:
             seen.add(event.event_id)
             replay.append(event)

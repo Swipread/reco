@@ -198,7 +198,7 @@ def state_from_json(doc: Mapping[str, Any]) -> ProfileState:
 
 
 # Profile events of a reader: the same filter for the events and for the mark.
-_PROFILE_EVENTS_WHERE = "user_id = %(user)s AND type = ANY(%(types)s) AND article_id IS NOT NULL"
+_PROFILE_EVENTS_WHERE = "user_id = %(user)s AND type = ANY(%(types)s)"
 
 
 def _event_mark(conn: Connection, user_id: str) -> EventMark:

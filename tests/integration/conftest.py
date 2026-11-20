@@ -87,8 +87,7 @@ ARTICLES = [
 def seed(store: PgStore, conn: psycopg.Connection) -> None:
     """3 topics, 2 sources (one inactive), user u_1 with topic 1, and the ARTICLES.
 
-    Embeddings go to reco.article_embeddings. app.articles.embedding, which the reco never
-    reads, is filled for a_noemb only, so that reading it by mistake shows.
+    Embeddings go to reco.article_embeddings.
     """
     conn.execute(
         "INSERT INTO app.topics (id, slug, label) VALUES"
@@ -107,12 +106,11 @@ def seed(store: PgStore, conn: psycopg.Connection) -> None:
     for k, (aid, source, age_days, model, topics, ingested_h) in enumerate(ARTICLES):
         conn.execute(
             "INSERT INTO app.articles (id, source_id, url, title, summary, language, word_count,"
-            " published_at, ingested_at, embedding)"
-            " VALUES (%s, %s, %s, %s, %s, 'FR-fr', %s, %s, %s, %s)",
+            " published_at, ingested_at)"
+            " VALUES (%s, %s, %s, %s, %s, 'FR-fr', %s, %s, %s)",
             (
                 aid, source, f"https://live.example/{aid}", f"Title {aid}", f"Summary {aid}",
                 100 * (k + 1), NOW - timedelta(days=age_days), NOW - timedelta(hours=ingested_h),
-                unit_vector(100 + k) if model is None else None,
             ),
         )
         if model is not None:

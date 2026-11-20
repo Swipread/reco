@@ -33,7 +33,6 @@ def test_event_mark_counts_profile_events_and_names_the_last(store, seed, conn):
     insert_event(conn, "e_3", "open", "a_old", 1)
     insert_event(conn, "e_2", "open", "a_ok", 1)          # same time: e_3 is the last
     insert_event(conn, "e_4", "impression", "a_ok", 0.5)  # not a profile event
-    insert_event(conn, "e_5", "open", None, 0.5)          # no article
     insert_event(conn, "e_6", "like", "a_ok", 0.1, user_id="u_other")
     assert store.event_mark("u_1") == EventMark(3, NOW - timedelta(hours=1), "e_3")
 

@@ -1,5 +1,5 @@
 -- Mirror, for the reco's integration tests, of what the backend's Flyway migrations create
--- (Swipread/api at commit 48055c3, src/main/resources/db/migration):
+-- (Swipread/api at commit 3ec4afa, src/main/resources/db/migration):
 --   V1__init_schema.sql                 extension, schemas app and reco, tables, indexes
 --   V2__events_default_partition.sql    app.events_default
 --   V3__user_role.sql                   app.users.role
@@ -10,6 +10,9 @@
 --   V7__refresh_tokens.sql              app.refresh_tokens, out of the reco's reach
 --   V8__ingestion_and_reco_tables.sql   app.source_topics, read state of app.sources, drop of
 --                                       reco.user_profiles and reco.model_runs (contract v1.5)
+--   V9__drop_article_embedding_and_check_events.sql
+--                                       drop of app.articles.embedding and its index, NOT NULL
+--                                       app.events.article_id, CHECK on app.events.type
 -- Statements are copied as they are, in migration order; keep in sync with new migrations.
 -- The backend's tables are the reference: never add here what its migrations do not create.
 -- The reco's own tables are created by the service itself (PgStore.ensure_schema).
@@ -210,3 +213,13 @@ ALTER TABLE app.sources
 -- format qui n'est pas celui de son profil, sont supprimées.
 DROP TABLE reco.user_profiles;
 DROP TABLE reco.model_runs;
+
+-- La reco calcule et garde ses vecteurs dans reco.article_embeddings : la colonne embedding de app.articles et
+-- son index, prévus au départ, n'ont jamais été remplis ni lus.
+DROP INDEX app.articles_embedding_idx;
+ALTER TABLE app.articles DROP COLUMN embedding;
+
+-- L'API exige un article et un type connu pour chaque événement : la base l'impose aussi.
+ALTER TABLE app.events ALTER COLUMN article_id SET NOT NULL;
+ALTER TABLE app.events ADD CONSTRAINT events_type_check
+  CHECK (type IN ('impression', 'view', 'open', 'read', 'like', 'unlike', 'save', 'unsave', 'share', 'hide'));
