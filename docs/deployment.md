@@ -39,7 +39,7 @@ Both get `RECO_DATABASE_URL` (login role `reco_service`), `RECO_REDIS_URL` (the 
 - **First start.** Both processes create the `reco` tables if they are missing, one at a time (an advisory lock). The worker then encodes the whole catalogue (about 50 seconds for 200 articles), writes the fallback lists and creates the consumer group `reco` on the `events` stream.
 - **When it is down**, the API serves its fallback feed: a deployment or a crash of the recommender never breaks the reader's feed.
 - **Success of each reason** (algorithm 11.4), from the deployment directory: `docker compose run --rm --no-deps reco reasons`. A throwaway container of the same image and settings, so the running `reco` keeps its memory.
-- **Order with the API.** The recommender reads `app.articles.word_count_from_summary`, added by the API's migration V10 (API 1.1.2): deploy that API version first.
+- **Order with the API.** The recommender reads `app.articles.word_count_from_summary`, added by the API's migration V10 (API 1.2.0, in production since 2026-11-20): deploy that API version first.
 
 ## Releasing
 
